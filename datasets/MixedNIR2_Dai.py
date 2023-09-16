@@ -32,7 +32,10 @@ def overlay_outliers_on_png(raw_image, png_image, radius=2, threshold=50):
     
     outliers = np.where(diff > threshold)
     
-    overlay_image = png_image.copy()
+    try:
+        overlay_image = png_image.copy()
+    except:
+        overlay_image = png_image.clone()
     overlay_image[outliers] = 0
     return overlay_image
 

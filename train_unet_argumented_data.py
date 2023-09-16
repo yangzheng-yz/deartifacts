@@ -13,7 +13,7 @@ from PIL import Image
 from torchvision.transforms import functional as TF
 import random
 
-def rotate_and_scale_pair(input_image, target_image, degrees=(0, 30), scale=(0.8, 1.0)):
+def rotate_and_scale_pair(input_image, target_image, degrees=(0, 30), scale=(1.0, 1.0)):
     angle = random.uniform(degrees[0], degrees[1])
     
     scale_factor = random.uniform(scale[0], scale[1])
@@ -48,10 +48,21 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 work_space = "/mnt/samsung/zheng_data/datasets/NIRI_to_NIRII/training_log"
 data_root = "/mnt/samsung/zheng_data/datasets/NIRI_to_NIRII"
 shape = (512, 640)
+artifacts_database_root = "/mnt/samsung/zheng_data/datasets/"
+artifacts_database_path = [os.path.join(artifacts_database_root, i) for i in os.listdir(artifacts_database_root) if '.raw' in i]
+artifacts_database_path = ["/mnt/samsung/zheng_data/datasets/100ms_10.raw", "/mnt/samsung/zheng_data/datasets/scene0000_20ms_640_512_1000.raw", "/mnt/samsung/zheng_data/datasets/scene0000_50ms_640_512_1000.raw"]
+artifacts_database = []
+for path_to_raw in artifacts_database_path:
+    num_images = int(path_to_raw.split('/')[-1].split('.')[0].split('_')[-1])
+    raw_images = MixedNIR2_Dai.read_raw_images(path_to_raw, shape, num_images)
+    artifacts_database.append(raw_images)
+    
 
 # Training settings
-batch_size = 2
+batch_size = 4
 epoch_num = 100
+use_rotate_and_scale = True
+argumented_artifacts = True
 
 # Initialize model and optimizer
 model = ArtifactRemovalNet.UNet()
@@ -70,7 +81,7 @@ checkpoint_dir = os.path.join(work_space, f"checkpoints/{model_name}")
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 # Initialize Validation output save Folder
-img_save_dir = os.path.join(work_space, f"ValImages/{model_name}")
+img_save_dir = os.path.join(work_space, f"ValImages/{model_name}_argumented")
 os.makedirs(img_save_dir, exist_ok=True)
 
 # Initialize Dataset and DataLoader
@@ -100,6 +111,27 @@ for epoch in range(start_epoch, epoch_num):  # 100 epochs as an example
     pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}")
     
     for i, (input_images, target_images) in pbar:
+        if argumented_artifacts:
+            if random.random() > 0.8:
+                new_input_images = []
+                for tgt in target_images:
+                    random_raw_group = random.choice(artifacts_database)
+                    random_raw = random.choice(random_raw_group)
+                    threshold = random.randint(1000, 2000)
+                    radius = random.randint(2,5)
+                    new_inp = MixedNIR2_Dai.overlay_outliers_on_png(random_raw, tgt.squeeze(0), radius, threshold)
+                    new_input_images.append(new_inp.unsqueeze(0))
+                input_images = torch.stack(new_input_images)
+        
+        if use_rotate_and_scale:
+            new_input_images, new_target_images = [], []
+            for inp, tgt in zip(input_images, target_images):
+                new_inp, new_tgt = rotate_and_scale_pair(inp, tgt)
+                new_input_images.append(new_inp)
+                new_target_images.append(new_tgt)
+            input_images = torch.stack(new_input_images)
+            target_images = torch.stack(new_target_images)
+            
         input_images = input_images.to(device)
         target_images = target_images.to(device)
         
@@ -121,6 +153,25 @@ for epoch in range(start_epoch, epoch_num):  # 100 epochs as an example
         total_loss += loss.item()
         pbar.set_postfix({"Training Loss": loss.item(), 
                             "Training PSNR": batch_psnr})
+        train_output_images_cpu = output_images.clone().cpu().detach().numpy()
+        train_ori_images_cpu = input_images.clone().cpu().detach().numpy()
+        train_target_images_cpu = target_images.clone().cpu().detach().numpy()
+        for j in range(train_output_images_cpu.shape[0]):
+            img_array_output = train_output_images_cpu[j, 0]  # 获取第 j 张图像，假设单通道
+            img_array_output = (img_array_output * 255).astype('uint8')  # 如果需要，进行缩放和类型转换
+            img_output = Image.fromarray(img_array_output, 'L')  # 创建 PIL 图像
+            img_output.save(os.path.join(img_save_dir, f"train_epoch_{i * batch_size + j}_outputimg.png"))
+
+            img_array_ori = train_ori_images_cpu[j, 0]  # 获取第 j 张图像，假设单通道
+            img_array_ori = (img_array_ori * 255).astype('uint8')  # 如果需要，进行缩放和类型转换
+            img_ori = Image.fromarray(img_array_ori, 'L')  # 创建 PIL 图像
+            img_ori.save(os.path.join(img_save_dir, f"train_epoch_{i * batch_size + j}_oriimg.png"))
+
+            img_array_target = train_target_images_cpu[j, 0]  # 获取第 j 张图像，假设单通道
+            img_array_target = (img_array_target * 255).astype('uint8')  # 如果需要，进行缩放和类型转换
+            img_target = Image.fromarray(img_array_target, 'L')  # 创建 PIL 图像
+            img_target.save(os.path.join(img_save_dir, f"train_epoch_{i * batch_size + j}_targetimg.png"))
+
     
     writer.add_scalar('Training Loss', total_loss / len(train_loader), epoch)
     writer.add_scalar('Training PSNR', total_psnr / len(train_loader), epoch)

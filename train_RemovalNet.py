@@ -138,17 +138,17 @@ for epoch in range(start_epoch, epoch_num):  # 100 epochs as an example
                 img_array_output = val_output_images_cpu[j, 0]  # 获取第 j 张图像，假设单通道
                 img_array_output = (img_array_output * 255).astype('uint8')  # 如果需要，进行缩放和类型转换
                 img_output = Image.fromarray(img_array_output, 'L')  # 创建 PIL 图像
-                img_output.save(os.path.join(img_save_dir, f"val_epoch_{epoch}_outputimg_{idx * batch_size + j}.png"))
+                img_output.save(os.path.join(img_save_dir, f"val_epoch_{idx * batch_size + j}_outputimg.png"))
 
                 img_array_ori = val_ori_images_cpu[j, 0]  # 获取第 j 张图像，假设单通道
                 img_array_ori = (img_array_ori * 255).astype('uint8')  # 如果需要，进行缩放和类型转换
                 img_ori = Image.fromarray(img_array_ori, 'L')  # 创建 PIL 图像
-                img_ori.save(os.path.join(img_save_dir, f"val_epoch_{epoch}_oriimg_{idx * batch_size + j}.png"))
+                img_ori.save(os.path.join(img_save_dir, f"val_epoch_{idx * batch_size + j}_oriimg.png"))
 
                 img_array_target = val_target_images_cpu[j, 0]  # 获取第 j 张图像，假设单通道
                 img_array_target = (img_array_target * 255).astype('uint8')  # 如果需要，进行缩放和类型转换
                 img_target = Image.fromarray(img_array_target, 'L')  # 创建 PIL 图像
-                img_target.save(os.path.join(img_save_dir, f"val_epoch_{epoch}_targetimg_{idx * batch_size + j}.png"))
+                img_target.save(os.path.join(img_save_dir, f"val_epoch_{idx * batch_size + j}_targetimg.png"))
 
     avg_val_loss = val_loss / len(val_loader)
     avg_val_psnr = val_psnr / len(val_loader) / val_input_images.size(0)
