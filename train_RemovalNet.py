@@ -4,7 +4,7 @@ import torch.optim as optim
 import torch
 import torch.nn as nn
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 from utils import util
 from datasets import MixedNIR2_Dai
 from models import ArtifactRemovalNet
@@ -32,7 +32,7 @@ work_space = "/mnt/samsung/zheng_data/datasets/NIRI_to_NIRII/training_log"
 data_root = "/mnt/samsung/zheng_data/datasets/NIRI_to_NIRII"
 
 # Initialize model and optimizer
-model = ArtifactRemovalNet.UNet()
+model = ArtifactRemovalNet.RemovalNet()
 model = model.to(device)  # 移动模型到 GPU
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
