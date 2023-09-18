@@ -26,17 +26,13 @@ def read_png_image(file_path):
     return np.array(grayscale_img)
 
 # Function to overlay outliers on PNG images
-def overlay_outliers_on_png(raw_image, png_image, radius=2, threshold=50):
+def overlay_outliers_on_png(raw_image, png_image, radius=2, threshold=50, coef=1.0):
+    # Apply the Remove Outliers algorithm and get the outliers
     median_image = median_filter(raw_image, size=(2 * radius + 1))
     diff = np.abs(raw_image - median_image)
-    
+    overlay_image = png_image.copy()
     outliers = np.where(diff > threshold)
-    
-    try:
-        overlay_image = png_image.copy()
-    except:
-        overlay_image = png_image.clone()
-    overlay_image[outliers] = 0
+    overlay_image[outliers] = ( ((raw_image[outliers] - (-32768)) * (255/65536) + 0) ) * coef
     return overlay_image
 
 # Function to save image pairs with artifacts
@@ -82,11 +78,11 @@ class ArtifactRemovalDataset(Dataset):
         with_art_tensor = torch.tensor(with_art_image[np.newaxis, :, :], dtype=torch.float32) / 255.0
         without_art_tensor = torch.tensor(without_art_image[np.newaxis, :, :], dtype=torch.float32) / 255.0
         
-        return with_art_tensor, without_art_tensor
+        return with_art_tensor, without_art_tensor, img_name
 
 # Function to generate the dataset with and without artifacts
-def generate_artifact_dataset(data_root, path_to_raw, shape, num_images, radius=2, threshold=50):
-    for dataset_type in ['train', 'test', 'val']:
+def generate_artifact_dataset(data_root, raw_images, shape, num_images, radius=2, threshold=50):
+    for dataset_type in ['train', 'val']: # ['train', 'test', 'val']:
         # Directory where the images will be saved
         save_dir = os.path.join(data_root, dataset_type)
         
@@ -95,20 +91,22 @@ def generate_artifact_dataset(data_root, path_to_raw, shape, num_images, radius=
         
         # List all PNG images in the with_art folder
         png_files = glob.glob(os.path.join(save_dir, 'without_art', '*.png'))
-        
-        # Read raw images from the raw file
-        raw_images = read_raw_images(path_to_raw, shape, num_images)
-        
+                
         for img_idx, png_file in enumerate(png_files):
             # Read the PNG image
             png_image = read_png_image(png_file)
             
             # Randomly choose one raw image to generate artifact
-            random_raw = random.choice(raw_images)
-            
+            if isinstance(raw_images, list):
+                random_raw = random.choice(raw_images)
+                random_raw = random.choice(random_raw)
+            else:
+                random_raw = random.choice(raw_images)
+            # print("what is random_raw's size: ", type(raw_images[0][0]))
             # Generate image with artifacts
-            threshold = random.randint(1000, 2000)
+            # threshold = random.randint(1000, 2000)
             with_art_image = overlay_outliers_on_png(random_raw, png_image, radius, threshold)
+            print("processed %sth image" % img_idx)
             
             # Save the image pair
             save_image_with_artifacts(with_art_image, save_dir, png_file.split('/')[-1])
@@ -122,9 +120,13 @@ if __name__ == "__main__":
 
     # Uncomment and modify the following lines to run the function
     data_root = "/mnt/samsung/zheng_data/datasets/NIRI_to_NIRII"
-    path_to_raw = "/mnt/samsung/zheng_data/datasets/100ms.raw"
+    path_to_raws = ["/mnt/samsung/zheng_data/datasets/NIRI_to_NIRII/For_argumentation/100ms_100_white.raw",]
     shape = (512, 640)
-    num_images = 10
-
-    generate_artifact_dataset(data_root, path_to_raw, shape, num_images, radius=2, threshold=1000)
+    num_images = 100
+    artifacts_database = []
+    for path_to_raw in path_to_raws:
+        # num_images = int(path_to_raw.split('/')[-1].split('.')[0].split('_')[-1])
+        raw_images = read_raw_images(path_to_raw, shape, num_images)
+        artifacts_database.append(raw_images)
+    generate_artifact_dataset(data_root, artifacts_database, shape, num_images, radius=2, threshold=1000)
 
