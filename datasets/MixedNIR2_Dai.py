@@ -30,7 +30,13 @@ def overlay_outliers_on_png(raw_image, png_image, radius=2, threshold=50, coef=1
     # Apply the Remove Outliers algorithm and get the outliers
     median_image = median_filter(raw_image, size=(2 * radius + 1))
     diff = np.abs(raw_image - median_image)
-    overlay_image = png_image.copy()
+    try:
+        overlay_image = png_image.copy()
+    except:
+        overlay_image = png_image.clone()
+        # print(raw_image[100,100])
+        raw_image = torch.tensor(raw_image)
+        # print(raw_image[100,100])
     outliers = np.where(diff > threshold)
     overlay_image[outliers] = ( ((raw_image[outliers] - (-32768)) * (255/65536) + 0) ) * coef
     return overlay_image

@@ -4,7 +4,7 @@ import torch.optim as optim
 import torch
 import torch.nn as nn
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 from utils import util
 from datasets import MixedNIR2_Dai
 from models import ArtifactRemovalNet
@@ -58,13 +58,13 @@ for path_to_raw in artifacts_database_path:
     artifacts_database.append(raw_images)
     
 # Training settings
-batch_size = 2 # 8
+batch_size = 2
 epoch_num = 100
 use_rotate_and_scale = True
 argumented_artifacts = True
 
 # Initialize model and optimizer
-model = ArtifactRemovalNet.SimpleNet()
+model = ArtifactRemovalNet.UNet()
 model = model.to(device)  # 移动模型到 GPU
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
@@ -72,16 +72,16 @@ optimizer = optim.Adam(model.parameters(), lr=0.001)
 model_name = model.__class__.__name__
 # settings = 
 # tensorboard_dir = os.path.join(work_space, f"tensorboard/{model_name+settings}")
-tensorboard_dir = os.path.join(work_space, f"tensorboard/{model_name}_argumented_v2")
+tensorboard_dir = os.path.join(work_space, f"tensorboard/{model_name}_argumented")
 os.makedirs(tensorboard_dir, exist_ok=True)
 writer = SummaryWriter(tensorboard_dir)
 
 # Initialize Checkpoint Folder
-checkpoint_dir = os.path.join(work_space, f"checkpoints/{model_name}_argumented_v2")
+checkpoint_dir = os.path.join(work_space, f"checkpoints/{model_name}_argumented")
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 # Initialize Validation output save Folder
-img_save_dir = os.path.join(work_space, f"ValImages/{model_name}_argumented_v2")
+img_save_dir = os.path.join(work_space, f"ValImages/{model_name}_argumented")
 os.makedirs(img_save_dir, exist_ok=True)
 
 # Initialize Dataset and DataLoader
@@ -113,7 +113,7 @@ for epoch in range(start_epoch, epoch_num):  # 100 epochs as an example
     for i, (input_images, target_images, _) in pbar:
 
         if argumented_artifacts:
-            if random.uniform(0,1.0) > 0.8:
+            if random.random() > 0.5:
                 new_input_images = []
                 for tgt in target_images:
                     group_num = random.randint(0,1) # 0,1,2

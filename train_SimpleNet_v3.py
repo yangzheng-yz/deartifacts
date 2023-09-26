@@ -4,7 +4,7 @@ import torch.optim as optim
 import torch
 import torch.nn as nn
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 from utils import util
 from datasets import MixedNIR2_Dai
 from models import ArtifactRemovalNet
@@ -72,16 +72,16 @@ optimizer = optim.Adam(model.parameters(), lr=0.001)
 model_name = model.__class__.__name__
 # settings = 
 # tensorboard_dir = os.path.join(work_space, f"tensorboard/{model_name+settings}")
-tensorboard_dir = os.path.join(work_space, f"tensorboard/{model_name}_argumented_v2")
+tensorboard_dir = os.path.join(work_space, f"tensorboard/{model_name}_argumented_v3")
 os.makedirs(tensorboard_dir, exist_ok=True)
 writer = SummaryWriter(tensorboard_dir)
 
 # Initialize Checkpoint Folder
-checkpoint_dir = os.path.join(work_space, f"checkpoints/{model_name}_argumented_v2")
+checkpoint_dir = os.path.join(work_space, f"checkpoints/{model_name}_argumented_v3")
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 # Initialize Validation output save Folder
-img_save_dir = os.path.join(work_space, f"ValImages/{model_name}_argumented_v2")
+img_save_dir = os.path.join(work_space, f"ValImages/{model_name}_argumented_v3")
 os.makedirs(img_save_dir, exist_ok=True)
 
 # Initialize Dataset and DataLoader
@@ -122,7 +122,7 @@ for epoch in range(start_epoch, epoch_num):  # 100 epochs as an example
                     random_raw = random.choice(random_raw_group)
                     threshold = 1000
                     radius = 2
-                    coef = random.uniform(0.1,0.4)
+                    coef = 1.0 # random.uniform(0.1,0.4)
                     new_inp = MixedNIR2_Dai.overlay_outliers_on_png(random_raw, tgt.squeeze(0), radius, threshold, coef=coef)
                     new_input_images.append(new_inp.unsqueeze(0))
                 input_images = torch.stack(new_input_images)
@@ -143,7 +143,7 @@ for epoch in range(start_epoch, epoch_num):  # 100 epochs as an example
         
         output_images = model(input_images)
         
-        loss = l1_criterion(output_images, target_images)
+        loss = l2_criterion(output_images, target_images)
         loss.backward()
         
         optimizer.step()
@@ -174,7 +174,7 @@ for epoch in range(start_epoch, epoch_num):  # 100 epochs as an example
             
             val_output_images = model(val_input_images)
             
-            val_loss_batch = l1_criterion(val_output_images, val_target_images)
+            val_loss_batch = l2_criterion(val_output_images, val_target_images)
             val_loss += val_loss_batch.item()
             val_psnr_inbatch = 0.0
             for j in range(val_input_images.size(0)):
