@@ -13,20 +13,20 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 # Initialize Dataset and DataLoader for the test set
 batch_size = 1  # Change this based on your available resources
 data_root = "/mnt/samsung/zheng_data/datasets/NIRI_to_NIRII"
-dataset_test = MixedNIR2_Dai.ArtifactRemovalDataset(root_dir=data_root, split='test_20ms')
+dataset_test = MixedNIR2_Dai.ArtifactRemovalDataset(root_dir=data_root, split='test_one')
 test_loader = DataLoader(dataset_test, batch_size=batch_size, shuffle=False)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # Initialize model and load checkpoint
-model = ArtifactRemovalNet.SimpleNet()
-checkpoint_path = "/mnt/samsung/zheng_data/datasets/NIRI_to_NIRII/training_log/checkpoints/SimpleNet_argumented_v2/best.pth"  # Replace this with the path to your checkpoint file
+model = ArtifactRemovalNet.UNet()
+checkpoint_path = "/mnt/samsung/zheng_data/datasets/NIRI_to_NIRII/training_log/checkpoints/UNet_argumented/epoch_99.pth"  # Replace this with the path to your checkpoint file
 checkpoint = torch.load(checkpoint_path)
 model.load_state_dict(checkpoint['model_state_dict'])
 model = model.to(device)
 model.eval()
 
 # Output directories
-output_image_dir = "/mnt/samsung/zheng_data/datasets/NIRI_to_NIRII/training_log/test_20ms_SimpleNet_argu0.2"
+output_image_dir = "/mnt/samsung/zheng_data/datasets/NIRI_to_NIRII/training_log/test_one_UNet"
 os.makedirs(output_image_dir, exist_ok=True)
 
 # PSNR function
