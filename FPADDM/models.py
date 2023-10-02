@@ -247,6 +247,8 @@ class MultiFPAGaussianDiffusion(nn.Module):
         to_torch = partial(torch.tensor, dtype=torch.float32)
 
         self.register_buffer('betas', to_torch(betas))
+        self.register_buffer('sqrt_betas', to_torch(np.sqrt(betas)))
+        self.register_buffer('sqrt_recip_alphas', to_torch(np.sqrt(1. / alphas)))
         self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
         self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
 
@@ -568,6 +570,14 @@ class MultiFPAGaussianDiffusion(nn.Module):
 
         img = F.interpolate(img, size=image_size, mode='bilinear')
         return self.p_sample_via_scale_loop(batch_size, img, s, custom_t=custom_t)
+    
+    # TODO: mask 's batch size?
+    @torch.no_grad()
+    def inverse_q_sample(self, x_t, t, noise=None, mask=None):
+        const = torch.ones_like(x_t)
+        x_t_prev = extract(self.sqrt_recip_alphas, t, x_t.shape) * (x_t - 
+            extract(self.sqrt_betas, t, x_t.shape) * mask * (noise + const))        
+        return x_t_prev
 
     def q_sample(self, x_start, t, noise=None, mask=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
@@ -594,20 +604,20 @@ class MultiFPAGaussianDiffusion(nn.Module):
         x_recon = self.denoise_fn(x_noisy, t, ept)
 
         if self.loss_type == 'l1':
-            loss = (noise - x_recon).abs().mean()
+            loss = ((noise - x_recon) * self.masks[int(ept) / int(2) - 1]).abs().mean()
         elif self.loss_type == 'l2':
-            loss = F.mse_loss(noise, x_recon)
-        elif self.loss_type == 'l1_pred_img':
-            # if int(s) > 0:
-            #     cur_gammas = self.gammas[s - 1].reshape(-1)
-            #     if t[0]>0:
-            #         x_mix_prev = extract(cur_gammas, t-1, x_start.shape) * x_start + \
-            #                 (1 - extract(cur_gammas, t-1, x_start.shape)) * x_orig  # mix blurred and orig
-            #     else:
-            #         x_mix_prev = x_orig
-            # else:
-            x_mix_prev = x_start
-            loss = (x_mix_prev-x_recon).abs().mean()
+            loss = F.mse_loss(noise * self.masks[int(ept) / int(2) - 1], x_recon * self.masks[int(ept) / int(2) - 1])
+        # elif self.loss_type == 'l1_pred_img':
+        #     # if int(s) > 0:
+        #     #     cur_gammas = self.gammas[s - 1].reshape(-1)
+        #     #     if t[0]>0:
+        #     #         x_mix_prev = extract(cur_gammas, t-1, x_start.shape) * x_start + \
+        #     #                 (1 - extract(cur_gammas, t-1, x_start.shape)) * x_orig  # mix blurred and orig
+        #     #     else:
+        #     #         x_mix_prev = x_orig
+        #     # else:
+        #     x_mix_prev = x_start
+        #     loss = (x_mix_prev-x_recon).abs().mean()
         else:
             raise NotImplementedError()
 
