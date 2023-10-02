@@ -2,14 +2,13 @@ import torch
 import numpy as np
 import argparse
 import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 import torchvision
-from FPADDM.functions import create_img_masks
+from FPADDM.functions import create_img_masks, CustomDataLoader
 from FPADDM.models import FPADDMNet, MultiFPAGaussianDiffusion
 from FPADDM.trainer import MultiexposureTrainer
-from text2live_util.clip_extractor import ClipExtractor
+# from text2live_util.clip_extractor import ClipExtractor
 from datasets import MixedNIR2_Dai
-from torch.utils.data import DataLoader
+# from torch.utils.data import DataLoader
 
 def main():
 
@@ -42,6 +41,7 @@ def main():
     # parser.add_argument("--scale_factor", help='downscaling step for each scale.', default=1.411, type=float)
     # training params
     parser.add_argument("--timesteps", help='total diffusion timesteps. note that the max trained exporesure time is args.timesteps * 2ms', default=50, type=int)
+    parser.add_argument("--loss_type", help='Options: l1, l2, l1_mask, l1_pred_img, l1_mask_pred_img', default='l1', type=str)
     parser.add_argument("--train_batch_size", help='batch size during training.', default=8, type=int)
     parser.add_argument("--total_epoch", help='total epochs for training', default=200, type=int)
     parser.add_argument("--start_save_epoch", help='the first epoch for saving', default=1, type=int)
@@ -103,7 +103,7 @@ def main():
         train_full_t=True,
         # scale_losses=rescale_losses,
         loss_factor=args.loss_factor,
-        loss_type='l1',
+        loss_type=args.loss_type,
         betas=None,
         device=device,
         # reblurring=True,
@@ -121,8 +121,8 @@ def main():
     
     dataset_train = MixedNIR2_Dai.FPADDMDataset(root_dir=args.dataset_folder, split='train')
     dataset_val = MixedNIR2_Dai.FPADDMDataset(root_dir=args.dataset_folder, split='val')
-    train_loader = DataLoader(dataset_train, batch_size=args.train_batch_size, shuffle=True)
-    val_loader = DataLoader(dataset_val, batch_size=args.deart_batch_size, shuffle=False)
+    train_loader = CustomDataLoader(dataset_train, training=True, batch_size=args.train_batch_size, shuffle=True)
+    val_loader = CustomDataLoader(dataset_val, training=False, batch_size=args.deart_batch_size, shuffle=False)
     dataloader_list = [train_loader, val_loader]
 
     ExposureTrainer = MultiexposureTrainer(
@@ -147,8 +147,8 @@ def main():
 
         )
 
-    if args.load_milestone > 0:
-        ExposureTrainer.load(milestone=args.load_milestone)
+    if args.load_epoch > 0:
+        ExposureTrainer.load(milestone=args.load_epoch)
     if args.mode == 'train':
         ExposureTrainer.train()
         # Sample after training is complete
@@ -160,6 +160,7 @@ def main():
         #                            )
     elif args.mode == 'deartifacts':
         ExposureTrainer.train(dataloader_list=[val_loader], total_epoch=1)
+
     
     # elif args.mode == 'sample':
 

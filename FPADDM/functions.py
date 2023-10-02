@@ -1,5 +1,6 @@
 
 import torch
+import torch.nn.functional as F
 from skimage import morphology, filters
 from inspect import isfunction
 import numpy as np
@@ -7,6 +8,7 @@ from PIL import Image
 from pathlib import Path
 import os
 import cv2
+from torch.utils.data import DataLoader
 
 
 try:
@@ -171,12 +173,36 @@ def generate_random_even(timesteps):
     return random_even
 # TODO: should check the value range
 def add_noise(raw_path, clean_data, ept, size=(512, 640), dtype=np.uint8, num_frames=268, alpha=0.5):
-    images = read_raw_images(raw_path, size, num_frames, dtype=dtype)
-    normal_values = torch.randn(clean_data.shape)
-    mask = torch.zeros_like(clean_data, dtype=torch.int)
-    const = torch.ones_like(clean_data, dtype=torch.int)
+    images = read_raw_images(raw_path, size, num_frames, dtype=dtype)  # numpy
+    normal_values = torch.randn(clean_data.shape, device=clean_data.device)  # clean data is tensor on GPU
+    reference_image = images[int(int(ept) / int(2)) - 1]
+    reference_tensor = torch.from_numpy(reference_image).to(clean_data.device)  # Convert to tensor and move to the same device as clean_data
+    mask = torch.where(reference_tensor >= 49, torch.tensor(1.0, device=clean_data.device), torch.tensor(0.0, device=clean_data.device))
+    const = torch.ones_like(clean_data)
     
     overlay_image = alpha * clean_data + (1 - alpha) * mask * (normal_values + const)
     overlay_image = torch.clamp(overlay_image, 0, 1)
     
     return overlay_image
+
+
+class CustomDataLoader(DataLoader):
+    def __init__(self, dataset, training=True, **kwargs):
+        super().__init__(dataset, **kwargs)
+        self.training = training
+
+def batch_PSNR(img1, img2, max_pixel_value=1.0):
+    """
+    Computes the PSNR between a batch of images
+
+    Args:
+        img1 (torch.Tensor): A batch of images. Shape: (B, C, H, W)
+        img2 (torch.Tensor): A batch of images to compare to. Shape: (B, C, H, W)
+        max_pixel_value (float): The maximum possible pixel value of the images.
+
+    Returns:
+        torch.Tensor: The PSNR values. Shape: (B,)
+    """
+    mse = F.mse_loss(img1, img2, reduction='none').mean(dim=[1, 2, 3])
+    psnr = 10 * torch.log10((max_pixel_value ** 2) / (mse + 1e-8))
+    return psnr

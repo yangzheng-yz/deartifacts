@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torchvision import utils
 from matplotlib import pyplot as plt
 from tqdm import tqdm
+import random
 
 
 class EMA():
@@ -87,7 +88,7 @@ class FPADDMNet(nn.Module):
             self,
             dim,
             out_dim=None,
-            channels=3,
+            channels=1, # processing gray image
             with_time_emb=True,
             multiexposure=False,
             device=None
@@ -135,8 +136,8 @@ class FPADDMNet(nn.Module):
 
         if exists(self.multiexposure):
             exposure_tensor = torch.ones(size=time.shape).to(device=self.device) * exposure
-            t = self.SinEmbTime(time)
-            s = self.SinEmbExposure(exposure_tensor)
+            t = self.FPAEmbTime(time)
+            s = self.FPAEmbExposure(exposure_tensor)
             t_s_vec = torch.cat((t, s), dim=1)
             cond_vec = self.time_mlp(t_s_vec)
         else:
@@ -225,6 +226,7 @@ class MultiFPAGaussianDiffusion(nn.Module):
         #     self.image_sizes += ((image_sizes[i][1], image_sizes[i][0]),)
 
         self.denoise_fn = denoise_fn
+        self.timesteps = timesteps
 
         if exists(betas):
             betas = betas.detach().cpu().numpy() if isinstance(betas, torch.Tensor) else betas
@@ -574,25 +576,47 @@ class MultiFPAGaussianDiffusion(nn.Module):
     # TODO: mask 's batch size?
     # @torch.no_grad()
     def inverse_q_sample(self, x_t, t, ept, noise=None):
-        noise = self.denoise_fn(x_t, t, ept)
+        noise = self.denoise_fn(x_t, t, ept) if noise is None else noise
+        # min_pixel_value = torch.min(noise)
+        # max_pixel_value = torch.max(noise)
+
+        # print(f'[Debug]Min noise pixel value: {min_pixel_value.item()}')
+        # print(f'[Debug]Max noise pixel value: {max_pixel_value.item()}')
         const = torch.ones_like(x_t)
-        x_t_prev = extract(self.sqrt_recip_alphas, t, x_t.shape) * (x_t - 
-            extract(self.sqrt_betas, t, x_t.shape) * self.masks[int(ept) / int(2) - 1] * (noise + const))        
-        return x_t_prev
+        mask = self.masks[int(int(ept) / int(2)) - 1] if (int(int(ept) / int(2)) - 1) < len(self.masks) else self.masks[-1]
+        if not isinstance(mask, torch.Tensor):
+            mask = torch.from_numpy(mask)
+            mask = mask.to(x_t.device)
+        if self.loss_type == 'l1' or 'l1_prev_img':
+            x_t_prev = extract(self.sqrt_recip_alphas, t, x_t.shape) * (x_t - 
+                extract(self.sqrt_betas, t, x_t.shape) * mask * (noise + const))   
+            x_t_prev = x_t_prev.clamp(0,1)   # TODO: should be this clamp???  
+        elif self.loss_type == 'l1_mask' or 'l1_mask_prev_img':
+            x_t_prev = extract(self.sqrt_recip_alphas, t, x_t.shape) * (x_t - 
+                extract(self.sqrt_betas, t, x_t.shape) * (noise + mask * const))   
+            x_t_prev = x_t_prev.clamp(0,1)   # TODO: should be this clamp???              
+        return x_t_prev, noise
 
     def q_sample(self, x_start, t, noise=None, mask=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         const = torch.ones_like(x_start)
-        print("[Debug]x_start max: ", max(x_start))
+
+        # print(f"[Debug]x_start size: {x_start.size()} | type: {type(x_start)} | device: {x_start.device}")
+        # print(f"[Debug]sqrt_alphas_cumprod size: {extract(self.sqrt_alphas_cumprod, t, x_start.shape).size()} | type: {type(extract(self.sqrt_alphas_cumprod, t, x_start.shape))} | device: {extract(self.sqrt_alphas_cumprod, t, x_start.shape).device}")
+        # print(f"[Debug]sqrt_one_minus_alphas_cumprod size: {extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape).size()} | type: {type(extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape))} | device: {extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape).device}")
+        # print(f"[Debug]noise size: {noise.size()} | type: {type(noise)} | device: {noise.device}")
+        # print(f"[Debug]const size: {const.size()} | type: {type(const)} | device: {const.device}")
+        # print(f"[Debug]mask size: {mask.size()} | type: {type(mask)} | device: {mask.device}")
+        # print("[Debug]x_start max: ", torch.max(x_start, dim=0))
         return (
                 extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
                 extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * (noise + const) * mask 
         )
 
-    def p_losses(self, x_start, t, ept, noise=None, x_orig=None):
+    def p_losses(self, x_start, t_val, ept, noise=None, x_orig=None):
         b, c, h, w = x_start.shape
         noise = default(noise, lambda: torch.randn_like(x_start))
-
+        t = torch.tensor([t_val] * b, device=x_start.device, dtype=torch.long)
         # if int(s) > 0:
         #     cur_gammas = self.gammas[s - 1].reshape(-1)
         #     x_mix = extract(cur_gammas, t, x_start.shape) * x_start + \
@@ -601,13 +625,38 @@ class MultiFPAGaussianDiffusion(nn.Module):
         #     x_recon = self.denoise_fn(x_noisy, t, s)
 
         # else:
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise, mask=self.masks[int(ept) / int(2) - 1])
+        # print(f'[Debug]{ept}ms refer to the {int(int(ept) / int(2)) - 1}th masks.')
+        mask = self.masks[int(int(ept) / int(2)) - 1]
+        if not isinstance(mask, torch.Tensor):
+            mask = torch.from_numpy(mask)
+            mask = mask.to(x_start.device)
+        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise, mask=mask)
         x_recon = self.denoise_fn(x_noisy, t, ept)
 
         if self.loss_type == 'l1':
-            loss = ((noise - x_recon) * self.masks[int(ept) / int(2) - 1]).abs().mean()
+            loss = ((noise - x_recon) * mask).abs().mean()
         elif self.loss_type == 'l2':
-            loss = F.mse_loss(noise * self.masks[int(ept) / int(2) - 1], x_recon * self.masks[int(ept) / int(2) - 1])
+            loss = F.mse_loss(noise * mask, x_recon * mask)
+        elif self.loss_type == 'l1_mask':
+            loss = (noise * mask - x_recon).abs().mean()
+        elif self.loss_type == 'l1_pred_img':
+            _x_noisy = x_noisy.clone()
+            for _t_val in reversed(range(0, t_val)):
+                _t = torch.tensor([_t_val] * b, device=x_start.device, dtype=torch.long)
+                if _t_val == (t_val - 1):
+                    _x_noisy, _noise = self.inverse_q_sample(x_noisy, _t, ept, noise=x_recon)
+                else:
+                    _x_noisy, _noise = self.inverse_q_sample(_x_noisy, _t, ept, noise=_noise)
+            loss = ((noise - x_recon) * mask).abs().mean() + (x_noisy - x_start).abs().mean()
+        elif self.loss_type == 'l1_mask_pred_img':
+            _x_noisy = x_noisy.clone()
+            for _t_val in reversed(range(0, t_val)):
+                _t = torch.tensor([_t_val] * b, device=x_start.device, dtype=torch.long)
+                if _t_val == (t_val - 1):
+                    _x_noisy, _noise = self.inverse_q_sample(x_noisy, _t, ept, noise=x_recon)
+                else:
+                    _x_noisy, _noise = self.inverse_q_sample(_x_noisy, _t, ept, noise=_noise)
+            loss = ((noise - x_recon) * mask).abs().mean() + (_x_noisy - x_start).abs().mean()
         # elif self.loss_type == 'l1_pred_img':
         #     # if int(s) > 0:
         #     #     cur_gammas = self.gammas[s - 1].reshape(-1)
@@ -622,13 +671,14 @@ class MultiFPAGaussianDiffusion(nn.Module):
         else:
             raise NotImplementedError()
 
-        return loss
+        return loss, x_noisy.clone(), t_val
 
     def iterative_deartifacts(self, x_T, ept, T=50):
         clean_images = x_T.clone()
-        
-        for t in reversed(range(0, T)):
-            clean_images = self.inverse_q_sample(clean_images, t, ept)
+        b, *_ = clean_images.shape
+        for t_val in reversed(range(0, T)):
+            t = torch.tensor([t_val] * b, device=clean_images.device, dtype=torch.long)
+            clean_images, _ = self.inverse_q_sample(clean_images, t, ept)
             
         return clean_images
 
@@ -647,6 +697,9 @@ class MultiFPAGaussianDiffusion(nn.Module):
 
         b, c, h, w = x.shape
         device = x.device
-        t = torch.randint(0, self.num_timesteps_trained[0], (b,), device=device).long()
-        return self.p_losses(x, t, ept, *args, **kwargs)
+        t_val = random.randint(0, self.num_timesteps_trained[0])
+        
+        # t = torch.randint(0, self.num_timesteps_trained[0], (b,), device=device).long()
+        print(f"[Debug] t {t_val} | exposure time {ept}")
+        return self.p_losses(x, t_val, ept, *args, **kwargs)
 

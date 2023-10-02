@@ -17,9 +17,11 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import MultiStepLR
 
 from matplotlib import pyplot as plt
-from skimage.exposure import match_histograms
-from text2live_util.util import get_augmentations_template
+# from skimage.exposure import match_histograms
+# from text2live_util.util import get_augmentations_template
 from tqdm import tqdm
+import torchvision.utils as vutils
+
 
 
 try:
@@ -204,18 +206,35 @@ class MultiexposureTrainer(object):
             for loader in dataloader_list:
                 torch.set_grad_enabled(loader.training)
                 self.model.train(loader.training)
-                mode = "train" if loader.trainig else "val"
+                mode = "train" if loader.training else "val"
+                model_device = self.model.device
+                iterations = 0
                 if loader.training:
                     for clean_data, image_name in loader:
                         ept = generate_random_even(self.model.timesteps)
-                        loss = self.model(clean_data, ept)
-                        loss_avg += loss.item()
-                        backwards(loss / self.gradient_accumulate_every, self.opt)
+                        clean_data = clean_data.to(model_device)
+                        # print(f"[Debug]model's device is {self.model.device}")
+                        # print(f"[Debug]clean_data's device is {clean_data.device}")
+                        loss, noisy_data, t_val = self.model(clean_data, ept)
+                        if '0000B.png' in image_name:
+                            for img_name in image_name:
+                                if '0000B.png' == img_name:
+                                    first_image = noisy_data[0].unsqueeze(0)
+                                    vutils.save_image(first_image, f'train_{img_name[:-4]}_ept{ept}_t{t_val}.png')
+                        # first_image = noisy_data[0].unsqueeze(0)
+                        # vutils.save_image(first_image, f'train_{image_name[0][:-4]}_ept{ept}_t{t_val}.png')
 
-                    if self.epoch % self.avg_window == 0:
-                        print(f'[{mode}]epoch:{self.epoch} loss:{loss_avg/self.avg_window}')
-                        self.running_loss.append(loss_avg/self.avg_window)
+                        loss_avg += loss.item()
+                        iterations += 1
+                        # backwards(loss / self.gradient_accumulate_every, self.opt)
+                        backwards(loss, self.opt)
+                        
+
+                    # if self.epoch % self.avg_window == 0:
+                        print(f'[{mode}]epoch(Total):{self.epoch}({total_epoch}) | iteration/loader length: {iterations}/{len(loader)} | loss:{loss_avg/iterations} | batch size: {len(clean_data)}')
+                        self.running_loss.append(loss_avg/iterations)
                         loss_avg = 0
+                        # break
                     
                     
                     self.opt.step()
@@ -225,16 +244,43 @@ class MultiexposureTrainer(object):
                         self.step_ema()
                     self.scheduler.step()
                 else:
+                    if self.epoch % self.save_and_sample_every != 0:
+                        continue
                     for idx, (clean_data, image_name) in enumerate(loader):
+                        clean_data = clean_data.to(model_device)
                         for ept in [20, 50, 100, 150, 200]:
                             b, *_ = clean_data.shape
-                            noisy_data = add_noise(self.raw_path, clean_data.clone(), ept)
+                            if 'ms' in image_name:
+                                ept = int(image_name[0].split('_')[-1][:-4])
+                                noisy_data = clean_data.clone()
+                            else:
+                                noisy_data = add_noise(self.raw_path, clean_data.clone(), ept)
+
                             clean_images = self.model.iterative_deartifacts(noisy_data, ept)
-                            metrics = 0
-                            for idx, _ in enumerate(clean_images):
-                                metrics += self.PSNR(clean_images[idx], clean_data[idx]).item()
-                            print(f'[{mode}]epoch:{self.epoch} psnr:{metrics / b}')
-                    if self.epoch > self.start and self.epoch % self.save_and_sample_every == 0:
+                            if '0000B.png' in image_name or 'ms' in image_name:
+                                first_image = noisy_data[0].unsqueeze(0)
+                                vutils.save_image(first_image, f'val_noisy_{image_name[0][:-4]}_ept{ept}.png')
+                                first_image = clean_images[0].unsqueeze(0)
+                                vutils.save_image(first_image, f'val_deartifacts_{image_name[0][:-4]}_ept{ept}.png')                                
+                            # first_image = noisy_data[0].unsqueeze(0)
+                            # vutils.save_image(first_image, f'val_noisy_{image_name[0][:-4]}_ept{ept}.png')
+                            # first_image = clean_images[0].unsqueeze(0)
+                            # vutils.save_image(first_image, f'val_deartifacts_{image_name[0][:-4]}_ept{ept}.png')                                
+
+                            # metrics = 0
+                            # for idx, _ in enumerate(clean_images):
+                            metrics = batch_PSNR(clean_images, clean_data).item()
+                            # min_pixel_value = torch.min(clean_images)
+                            # max_pixel_value = torch.max(clean_images)
+
+                            # print(f'[Debug]Min pixel value: {min_pixel_value.item()}')
+                            # print(f'[Debug]Max pixel value: {max_pixel_value.item()}')
+
+                            print(f'[{mode}]epoch[batch_size={b}, iter={idx}, ept={ept}]:{self.epoch} psnr:{metrics}')
+                            # if 'ms' in image_name:
+                            #     break
+                        # break
+                    if self.epoch >= self.start_save_epoch:
                         milestone = self.epoch 
                         self.save(milestone)
                         # batches = num_to_groups(16, self.batch_size)
@@ -259,266 +305,266 @@ class MultiexposureTrainer(object):
 
         print('training completed')
 
-    def sample_scales(self, scale_mul=None, batch_size=16, custom_sample=False, custom_image_size_idxs=None,
-                      custom_scales=None, image_name='', start_noise= True, custom_t_list=None, desc=None, save_unbatched=True):
-        # if desc is None:
-            # desc = f'sample_{str(datetime.datetime.now()).replace(":", "_")}'
-        # if self.ema_model.reblurring:
-        #     desc = desc + '_rblr'
-        # if self.ema_model.sample_limited_t:
-            # desc = desc + '_t_lmtd'
-        # sample with custom t list
-        # if custom_t_list is None:
-            # custom_t_list = self.ema_model.num_timesteps_ideal[1:]
-        # sample with custom scale list
-        # if custom_scales is None:
-            # custom_scales = [*range(self.n_scales)]
-            # n_scales = self.n_scales
-        # else:
-            # n_scales = len(custom_scales)
-        # if custom_image_size_idxs is None:
-            # custom_image_size_idxs = [*range(self.n_scales)]
+    # def sample_scales(self, scale_mul=None, batch_size=16, custom_sample=False, custom_image_size_idxs=None,
+    #                   custom_scales=None, image_name='', start_noise= True, custom_t_list=None, desc=None, save_unbatched=True):
+    #     # if desc is None:
+    #         # desc = f'sample_{str(datetime.datetime.now()).replace(":", "_")}'
+    #     # if self.ema_model.reblurring:
+    #     #     desc = desc + '_rblr'
+    #     # if self.ema_model.sample_limited_t:
+    #         # desc = desc + '_t_lmtd'
+    #     # sample with custom t list
+    #     # if custom_t_list is None:
+    #         # custom_t_list = self.ema_model.num_timesteps_ideal[1:]
+    #     # sample with custom scale list
+    #     # if custom_scales is None:
+    #         # custom_scales = [*range(self.n_scales)]
+    #         # n_scales = self.n_scales
+    #     # else:
+    #         # n_scales = len(custom_scales)
+    #     # if custom_image_size_idxs is None:
+    #         # custom_image_size_idxs = [*range(self.n_scales)]
 
-        samples_from_scales = []
-        final_results_folder = Path(str(self.results_folder / 'final_samples'))
-        final_results_folder.mkdir(parents=True, exist_ok=True)
-        if scale_mul is not None:
-            scale_0_size = (
-                int(self.model.image_sizes[custom_image_size_idxs[0]][0] * scale_mul[0]),
-                int(self.model.image_sizes[custom_image_size_idxs[0]][1] * scale_mul[1]))
-        else:
-            scale_0_size = None
-        t_list = [self.ema_model.num_timesteps_trained[0]] + custom_t_list
-        res_sub_folder = '_'.join(str(e) for e in t_list)
-        final_img = None
-        for i in range(n_scales):
-            if start_noise and i == 0:
-                samples_from_scales.append(
-                    self.ema_model.sample(batch_size=batch_size, scale_0_size=scale_0_size, s=custom_scales[i]))
+    #     samples_from_scales = []
+    #     final_results_folder = Path(str(self.results_folder / 'final_samples'))
+    #     final_results_folder.mkdir(parents=True, exist_ok=True)
+    #     if scale_mul is not None:
+    #         scale_0_size = (
+    #             int(self.model.image_sizes[custom_image_size_idxs[0]][0] * scale_mul[0]),
+    #             int(self.model.image_sizes[custom_image_size_idxs[0]][1] * scale_mul[1]))
+    #     else:
+    #         scale_0_size = None
+    #     t_list = [self.ema_model.num_timesteps_trained[0]] + custom_t_list
+    #     res_sub_folder = '_'.join(str(e) for e in t_list)
+    #     final_img = None
+    #     for i in range(n_scales):
+    #         if start_noise and i == 0:
+    #             samples_from_scales.append(
+    #                 self.ema_model.sample(batch_size=batch_size, scale_0_size=scale_0_size, s=custom_scales[i]))
 
-            elif i == 0: # start_noise == False, means injecting the original training image
-                orig_sample_0 = Image.open((self.input_paths[custom_scales[i]] + '/' + image_name)).convert("RGB")
+    #         elif i == 0: # start_noise == False, means injecting the original training image
+    #             orig_sample_0 = Image.open((self.input_paths[custom_scales[i]] + '/' + image_name)).convert("RGB")
 
-                samples_from_scales.append((transforms.ToTensor()(orig_sample_0) * 2 - 1).repeat(batch_size, 1, 1, 1).to(self.device))
+    #             samples_from_scales.append((transforms.ToTensor()(orig_sample_0) * 2 - 1).repeat(batch_size, 1, 1, 1).to(self.device))
 
-            else:
-                samples_from_scales.append(self.ema_model.sample_via_scale(batch_size,
-                                                                           samples_from_scales[i - 1],
-                                                                           s=custom_scales[i],
-                                                                           scale_mul=scale_mul,
-                                                                           custom_sample=custom_sample,
-                                                                           custom_img_size_idx=custom_image_size_idxs[i],
-                                                                           custom_t=custom_t_list[int(custom_scales[i])-1],
-                                                                           ))
-            final_img = (samples_from_scales[i] + 1) * 0.5
+    #         else:
+    #             samples_from_scales.append(self.ema_model.sample_via_scale(batch_size,
+    #                                                                        samples_from_scales[i - 1],
+    #                                                                        s=custom_scales[i],
+    #                                                                        scale_mul=scale_mul,
+    #                                                                        custom_sample=custom_sample,
+    #                                                                        custom_img_size_idx=custom_image_size_idxs[i],
+    #                                                                        custom_t=custom_t_list[int(custom_scales[i])-1],
+    #                                                                        ))
+    #         final_img = (samples_from_scales[i] + 1) * 0.5
 
-            utils.save_image(final_img, str(final_results_folder / res_sub_folder) + f'_out_s{i}_{desc}_sm_{scale_mul[0]}_{scale_mul[1]}.png', nrow=4)
+    #         utils.save_image(final_img, str(final_results_folder / res_sub_folder) + f'_out_s{i}_{desc}_sm_{scale_mul[0]}_{scale_mul[1]}.png', nrow=4)
 
-        if save_unbatched:
-            final_results_folder = Path(str(self.results_folder / f'final_samples_unbatched_{desc}'))
-            final_results_folder.mkdir(parents=True, exist_ok=True)
-            for b in range(batch_size):
-                utils.save_image(final_img[b], str(final_results_folder / res_sub_folder) + f'_out_b{b}.png')
+    #     if save_unbatched:
+    #         final_results_folder = Path(str(self.results_folder / f'final_samples_unbatched_{desc}'))
+    #         final_results_folder.mkdir(parents=True, exist_ok=True)
+    #         for b in range(batch_size):
+    #             utils.save_image(final_img[b], str(final_results_folder / res_sub_folder) + f'_out_b{b}.png')
 
-    def image2image(self, input_folder='', input_file='', mask='', hist_ref_path='', image_name='', start_s=1, custom_t=None, batch_size=16, scale_mul=(1, 1), device=None, use_hist=False, save_unbatched=True, auto_scale=None, mode=None):
-        if custom_t is None:
-            custom_t = self.ema_model.num_timesteps_ideal # 0 - use default sampling t
-        input_path = os.path.join(input_folder, input_file)
-        input_img = Image.open(input_path).convert("RGB")
+    # def image2image(self, input_folder='', input_file='', mask='', hist_ref_path='', image_name='', start_s=1, custom_t=None, batch_size=16, scale_mul=(1, 1), device=None, use_hist=False, save_unbatched=True, auto_scale=None, mode=None):
+    #     if custom_t is None:
+    #         custom_t = self.ema_model.num_timesteps_ideal # 0 - use default sampling t
+    #     input_path = os.path.join(input_folder, input_file)
+    #     input_img = Image.open(input_path).convert("RGB")
 
-        image_size = input_img.size
-        if auto_scale is not None:
-            scaler = np.sqrt((image_size[0] * image_size[1]) / auto_scale)
-            if scaler > 1:
-                image_size = (int(image_size[0] / scaler), int(image_size[1] / scaler))
-                input_img = input_img.resize(image_size, Image.LANCZOS)
+    #     image_size = input_img.size
+    #     if auto_scale is not None:
+    #         scaler = np.sqrt((image_size[0] * image_size[1]) / auto_scale)
+    #         if scaler > 1:
+    #             image_size = (int(image_size[0] / scaler), int(image_size[1] / scaler))
+    #             input_img = input_img.resize(image_size, Image.LANCZOS)
 
-        if mode == 'harmonization':
-            mask_path = os.path.join(input_folder, mask)
-            mask_img = Image.open(mask_path).convert("RGB")
-            mask_img = mask_img.resize(image_size, Image.LANCZOS)
-            mask_img = transforms.ToTensor()(mask_img)
-            mask_img = dilate_mask(mask_img, mode=mode)
-            mask_img = torch.from_numpy(mask_img).to(self.device)
-        else:
-            mask_img = 1
+    #     if mode == 'harmonization':
+    #         mask_path = os.path.join(input_folder, mask)
+    #         mask_img = Image.open(mask_path).convert("RGB")
+    #         mask_img = mask_img.resize(image_size, Image.LANCZOS)
+    #         mask_img = transforms.ToTensor()(mask_img)
+    #         mask_img = dilate_mask(mask_img, mode=mode)
+    #         mask_img = torch.from_numpy(mask_img).to(self.device)
+    #     else:
+    #         mask_img = 1
 
-        if use_hist:
-            image_name = image_name.rsplit(".", 1)[0] + '.png'
-            orig_sample_0 = Image.open((hist_ref_path + image_name)).convert("RGB")  # next(self.dl_list[0])
-            input_img_ds_matched_arr = match_histograms(image=np.array(input_img), reference=np.array(orig_sample_0), channel_axis=2)
-            input_img = Image.fromarray(input_img_ds_matched_arr)
+    #     if use_hist:
+    #         image_name = image_name.rsplit(".", 1)[0] + '.png'
+    #         orig_sample_0 = Image.open((hist_ref_path + image_name)).convert("RGB")  # next(self.dl_list[0])
+    #         input_img_ds_matched_arr = match_histograms(image=np.array(input_img), reference=np.array(orig_sample_0), channel_axis=2)
+    #         input_img = Image.fromarray(input_img_ds_matched_arr)
 
-        input_img_tensor = (transforms.ToTensor()(input_img) * 2 - 1)  # normalize
-        input_size = torch.tensor(input_img_tensor.shape[1:])
-        input_img_batch = input_img_tensor.repeat(batch_size, 1, 1, 1).to(device)  # batchify and send to GPU
+    #     input_img_tensor = (transforms.ToTensor()(input_img) * 2 - 1)  # normalize
+    #     input_size = torch.tensor(input_img_tensor.shape[1:])
+    #     input_img_batch = input_img_tensor.repeat(batch_size, 1, 1, 1).to(device)  # batchify and send to GPU
 
-        final_results_folder = Path(str(self.results_folder / 'i2i_final_samples'))
-        final_results_folder.mkdir(parents=True, exist_ok=True)
-        final_img = None
-        t_string = '_'.join(str(e) for e in custom_t)
-        time = str(datetime.datetime.now()).replace(":", "_")
+    #     final_results_folder = Path(str(self.results_folder / 'i2i_final_samples'))
+    #     final_results_folder.mkdir(parents=True, exist_ok=True)
+    #     final_img = None
+    #     t_string = '_'.join(str(e) for e in custom_t)
+    #     time = str(datetime.datetime.now()).replace(":", "_")
 
-        if start_s > 0:  # starting scale has no mixing between blurry and clean images
-            self.ema_model.gammas[start_s-1].clamp_(0, 0)
-        samples_from_scales = []
-        for i in range(self.n_scales-start_s):
-            s = i + start_s
-            ds_factor = self.scale_factor ** (self.n_scales - s - 1)
-            cur_size = input_size/ds_factor
-            cur_size = (int(cur_size[0].item()), int(cur_size[1].item()))
+    #     if start_s > 0:  # starting scale has no mixing between blurry and clean images
+    #         self.ema_model.gammas[start_s-1].clamp_(0, 0)
+    #     samples_from_scales = []
+    #     for i in range(self.n_scales-start_s):
+    #         s = i + start_s
+    #         ds_factor = self.scale_factor ** (self.n_scales - s - 1)
+    #         cur_size = input_size/ds_factor
+    #         cur_size = (int(cur_size[0].item()), int(cur_size[1].item()))
 
-            if i == 0:
-                samples_from_scales.append(self.ema_model.sample_via_scale(batch_size,
-                                                                           input_img_batch,
-                                                                           s=s,
-                                                                           custom_t=custom_t[s],
-                                                                           scale_mul=scale_mul,
-                                                                           custom_image_size=cur_size), )
-            else:
-                samples_from_scales.append(self.ema_model.sample_via_scale(batch_size,
-                                                                           samples_from_scales[i - 1],
-                                                                           s=s,
-                                                                           custom_t=custom_t[s],
-                                                                           scale_mul=scale_mul,
-                                                                           custom_image_size=cur_size),)
-            final_img = (samples_from_scales[i] + 1) * 0.5
-            input_file_name = input_file.rsplit(".", 1)[0]
-            if i == self.n_scales-start_s - 1:
-                input_img_batch_denorm = (input_img_batch + 1) * 0.5
-                input_img_batch_denorm.clamp_(0.0, 1.0)
-                final_img = mask_img * final_img + (1 - mask_img) * input_img_batch_denorm
+    #         if i == 0:
+    #             samples_from_scales.append(self.ema_model.sample_via_scale(batch_size,
+    #                                                                        input_img_batch,
+    #                                                                        s=s,
+    #                                                                        custom_t=custom_t[s],
+    #                                                                        scale_mul=scale_mul,
+    #                                                                        custom_image_size=cur_size), )
+    #         else:
+    #             samples_from_scales.append(self.ema_model.sample_via_scale(batch_size,
+    #                                                                        samples_from_scales[i - 1],
+    #                                                                        s=s,
+    #                                                                        custom_t=custom_t[s],
+    #                                                                        scale_mul=scale_mul,
+    #                                                                        custom_image_size=cur_size),)
+    #         final_img = (samples_from_scales[i] + 1) * 0.5
+    #         input_file_name = input_file.rsplit(".", 1)[0]
+    #         if i == self.n_scales-start_s - 1:
+    #             input_img_batch_denorm = (input_img_batch + 1) * 0.5
+    #             input_img_batch_denorm.clamp_(0.0, 1.0)
+    #             final_img = mask_img * final_img + (1 - mask_img) * input_img_batch_denorm
 
-            utils.save_image(final_img, str(final_results_folder / f'{input_file_name}_i2i_s_{start_s+i}_t_{t_string}_hist_{"on" if use_hist else "off"}_{time}.png'), nrow=4)
-        if save_unbatched:
-            final_results_folder = Path(str(self.results_folder / f'unbatched_i2i_s{start_s}_t_{t_string}_{time}'))
-            final_results_folder.mkdir(parents=True, exist_ok=True)
-            for b in range(batch_size):
-                utils.save_image(final_img[b], os.path.join(final_results_folder ,input_file + f'_out_b{b}_i2i.png'))
+    #         utils.save_image(final_img, str(final_results_folder / f'{input_file_name}_i2i_s_{start_s+i}_t_{t_string}_hist_{"on" if use_hist else "off"}_{time}.png'), nrow=4)
+    #     if save_unbatched:
+    #         final_results_folder = Path(str(self.results_folder / f'unbatched_i2i_s{start_s}_t_{t_string}_{time}'))
+    #         final_results_folder.mkdir(parents=True, exist_ok=True)
+    #         for b in range(batch_size):
+    #             utils.save_image(final_img[b], os.path.join(final_results_folder ,input_file + f'_out_b{b}_i2i.png'))
 
-    def clip_sampling(self, clip_model, text_input, strength, sample_batch_size, custom_t_list=None,
-                      guidance_sub_iters=None, quantile=0.8, stop_guidance=None, save_unbatched=False, scale_mul=(1,1), llambda=0, start_noise=True, image_name=''):
-        if guidance_sub_iters is None:
-            guidance_sub_iters = [*reversed(range(self.n_scales))]
-        self.ema_model.clip_strength = strength
-        self.ema_model.clip_text = text_input
-        self.ema_model.text_embedds_hr = clip_model.get_text_embedding(text_input, template=get_augmentations_template('hr'))
-        self.ema_model.text_embedds_lr = clip_model.get_text_embedding(text_input, template=get_augmentations_template('lr'))
-        self.ema_model.clip_guided_sampling = True
-        self.ema_model.guidance_sub_iters = guidance_sub_iters
-        self.ema_model.quantile = quantile
-        self.ema_model.stop_guidance = stop_guidance
-        self.ema_model.clip_model = clip_model
-        self.ema_model.clip_score = []
-        self.ema_model.llambda = llambda
-        strength_string = f'{strength}'
-        gsi_string = '_'.join(str(e) for e in guidance_sub_iters)
-        n_aug = self.ema_model.clip_model.cfg["n_aug"]
-        desc = f"clip_{text_input.replace(' ', '_')}_n_aug{n_aug}_str_" + strength_string + "_gsi_" + gsi_string + \
-               f'_ff{1-quantile}' + f'_{str(datetime.datetime.now()).replace(":", "_")}'
+    # def clip_sampling(self, clip_model, text_input, strength, sample_batch_size, custom_t_list=None,
+    #                   guidance_sub_iters=None, quantile=0.8, stop_guidance=None, save_unbatched=False, scale_mul=(1,1), llambda=0, start_noise=True, image_name=''):
+    #     if guidance_sub_iters is None:
+    #         guidance_sub_iters = [*reversed(range(self.n_scales))]
+    #     self.ema_model.clip_strength = strength
+    #     self.ema_model.clip_text = text_input
+    #     self.ema_model.text_embedds_hr = clip_model.get_text_embedding(text_input, template=get_augmentations_template('hr'))
+    #     self.ema_model.text_embedds_lr = clip_model.get_text_embedding(text_input, template=get_augmentations_template('lr'))
+    #     self.ema_model.clip_guided_sampling = True
+    #     self.ema_model.guidance_sub_iters = guidance_sub_iters
+    #     self.ema_model.quantile = quantile
+    #     self.ema_model.stop_guidance = stop_guidance
+    #     self.ema_model.clip_model = clip_model
+    #     self.ema_model.clip_score = []
+    #     self.ema_model.llambda = llambda
+    #     strength_string = f'{strength}'
+    #     gsi_string = '_'.join(str(e) for e in guidance_sub_iters)
+    #     n_aug = self.ema_model.clip_model.cfg["n_aug"]
+    #     desc = f"clip_{text_input.replace(' ', '_')}_n_aug{n_aug}_str_" + strength_string + "_gsi_" + gsi_string + \
+    #            f'_ff{1-quantile}' + f'_{str(datetime.datetime.now()).replace(":", "_")}'
 
-        if not start_noise:  # relevant for mode==clip_style_trans
-            # start from last scale
-            custom_scales = [self.n_scales - 2, self.n_scales - 1]
-            custom_image_size_idxs = [self.n_scales - 2, self.n_scales - 1]
-            # custom_t_list = [self.ema_model.num_timesteps_ideal[-2], self.ema_model.num_timesteps_ideal[-1]]
-            self.sample_scales(scale_mul=scale_mul,  # H,W
-                               custom_sample=True,
-                               custom_scales=custom_scales,
-                               custom_image_size_idxs=custom_image_size_idxs,
-                               image_name=image_name,
-                               batch_size=sample_batch_size,
-                               custom_t_list=custom_t_list,
-                               desc=desc,
-                               save_unbatched=save_unbatched,
-                               start_noise=start_noise,
-                               )
-        else:  # relevant for mode==clip_style_gen or clip_content
-            self.sample_scales(scale_mul=scale_mul,  # H,W
-                               custom_sample=False,
-                               image_name='',
-                               batch_size=sample_batch_size,
-                               custom_t_list=custom_t_list,
-                               desc=desc,
-                               save_unbatched=save_unbatched,
-                               start_noise=start_noise,
-                               )
-        self.ema_model.clip_guided_sampling = False
+    #     if not start_noise:  # relevant for mode==clip_style_trans
+    #         # start from last scale
+    #         custom_scales = [self.n_scales - 2, self.n_scales - 1]
+    #         custom_image_size_idxs = [self.n_scales - 2, self.n_scales - 1]
+    #         # custom_t_list = [self.ema_model.num_timesteps_ideal[-2], self.ema_model.num_timesteps_ideal[-1]]
+    #         self.sample_scales(scale_mul=scale_mul,  # H,W
+    #                            custom_sample=True,
+    #                            custom_scales=custom_scales,
+    #                            custom_image_size_idxs=custom_image_size_idxs,
+    #                            image_name=image_name,
+    #                            batch_size=sample_batch_size,
+    #                            custom_t_list=custom_t_list,
+    #                            desc=desc,
+    #                            save_unbatched=save_unbatched,
+    #                            start_noise=start_noise,
+    #                            )
+    #     else:  # relevant for mode==clip_style_gen or clip_content
+    #         self.sample_scales(scale_mul=scale_mul,  # H,W
+    #                            custom_sample=False,
+    #                            image_name='',
+    #                            batch_size=sample_batch_size,
+    #                            custom_t_list=custom_t_list,
+    #                            desc=desc,
+    #                            save_unbatched=save_unbatched,
+    #                            start_noise=start_noise,
+    #                            )
+    #     self.ema_model.clip_guided_sampling = False
 
-    def clip_roi_sampling(self, clip_model, text_input, strength, sample_batch_size,
-                          num_clip_iters=100, num_denoising_steps=2, clip_roi_bb=None, save_unbatched=False):
+    # def clip_roi_sampling(self, clip_model, text_input, strength, sample_batch_size,
+    #                       num_clip_iters=100, num_denoising_steps=2, clip_roi_bb=None, save_unbatched=False):
 
-        text_embedds = clip_model.get_text_embedding(text_input, template=get_augmentations_template('lr'))
-        strength_string = f'{strength}'
-        n_aug = clip_model.cfg["n_aug"]
-        desc = f"clip_roi_{text_input.replace(' ', '_')}_n_aug{n_aug}_str_" + strength_string + "_n_iters_" + str(num_clip_iters) + \
-               f'_{str(datetime.datetime.now()).replace(":", "_")}'
-        image = self.data_list[self.n_scales-1][0][0][None,:,:,:]
-        image = image.repeat(sample_batch_size, 1, 1, 1)
+    #     text_embedds = clip_model.get_text_embedding(text_input, template=get_augmentations_template('lr'))
+    #     strength_string = f'{strength}'
+    #     n_aug = clip_model.cfg["n_aug"]
+    #     desc = f"clip_roi_{text_input.replace(' ', '_')}_n_aug{n_aug}_str_" + strength_string + "_n_iters_" + str(num_clip_iters) + \
+    #            f'_{str(datetime.datetime.now()).replace(":", "_")}'
+    #     image = self.data_list[self.n_scales-1][0][0][None,:,:,:]
+    #     image = image.repeat(sample_batch_size, 1, 1, 1)
 
-        image_roi = image[:,:,clip_roi_bb[0]:clip_roi_bb[0]+clip_roi_bb[2],clip_roi_bb[1]:clip_roi_bb[1]+clip_roi_bb[3]].clone()
+    #     image_roi = image[:,:,clip_roi_bb[0]:clip_roi_bb[0]+clip_roi_bb[2],clip_roi_bb[1]:clip_roi_bb[1]+clip_roi_bb[3]].clone()
 
-        image_roi.requires_grad_(True)
-        image_roi_renorm = (image_roi + 1) * 0.5
-        interm_results_folder = Path(str(self.ema_model.results_folder / f'interm_samples_clip_roi'))
-        interm_results_folder.mkdir(parents=True, exist_ok=True)
-        for i in tqdm(range(num_clip_iters)):
-            clip_model.zero_grad()
-            score = -clip_model.calculate_clip_loss(image_roi_renorm, text_embedds)
-            clip_grad = torch.autograd.grad(score, image_roi, create_graph=False)[0]
-            if self.ema_model.save_interm:
-                utils.save_image((image_roi.clamp(-1., 1.) + 1) * 0.5,
-                                 str(interm_results_folder / f'iter_{i}.png'),
-                                 nrow=4)
+    #     image_roi.requires_grad_(True)
+    #     image_roi_renorm = (image_roi + 1) * 0.5
+    #     interm_results_folder = Path(str(self.ema_model.results_folder / f'interm_samples_clip_roi'))
+    #     interm_results_folder.mkdir(parents=True, exist_ok=True)
+    #     for i in tqdm(range(num_clip_iters)):
+    #         clip_model.zero_grad()
+    #         score = -clip_model.calculate_clip_loss(image_roi_renorm, text_embedds)
+    #         clip_grad = torch.autograd.grad(score, image_roi, create_graph=False)[0]
+    #         if self.ema_model.save_interm:
+    #             utils.save_image((image_roi.clamp(-1., 1.) + 1) * 0.5,
+    #                              str(interm_results_folder / f'iter_{i}.png'),
+    #                              nrow=4)
 
-            image_roi_prev_norm = torch.linalg.vector_norm(image_roi, dim=(1, 2, 3), keepdim=True)
-            division_norm = torch.linalg.vector_norm(image_roi, dim=(1,2,3), keepdim=True) / torch.linalg.vector_norm(
-                clip_grad, dim=(1,2,3), keepdim=True)
-            image_roi_prev = image_roi
-            image_roi = image_roi_prev + strength* division_norm * clip_grad
-            image_roi_norm = torch.linalg.vector_norm(image_roi, dim=(1, 2, 3), keepdim=True)
-            keep_norm = False
-            if keep_norm:
-                image_roi *= (image_roi_prev_norm) / (image_roi_norm)
+    #         image_roi_prev_norm = torch.linalg.vector_norm(image_roi, dim=(1, 2, 3), keepdim=True)
+    #         division_norm = torch.linalg.vector_norm(image_roi, dim=(1,2,3), keepdim=True) / torch.linalg.vector_norm(
+    #             clip_grad, dim=(1,2,3), keepdim=True)
+    #         image_roi_prev = image_roi
+    #         image_roi = image_roi_prev + strength* division_norm * clip_grad
+    #         image_roi_norm = torch.linalg.vector_norm(image_roi, dim=(1, 2, 3), keepdim=True)
+    #         keep_norm = False
+    #         if keep_norm:
+    #             image_roi *= (image_roi_prev_norm) / (image_roi_norm)
 
-            image_roi.clamp_(-1., 1.)
-            image_roi_renorm = (image_roi + 1) * 0.5
+    #         image_roi.clamp_(-1., 1.)
+    #         image_roi_renorm = (image_roi + 1) * 0.5
 
-        # insert patch into original image
-        image[:, :, clip_roi_bb[0]:clip_roi_bb[0] + clip_roi_bb[2],clip_roi_bb[1]:clip_roi_bb[1] + clip_roi_bb[3]] = image_roi
-        #
-        final_image = self.ema_model.sample_via_scale(sample_batch_size,
-                                                      image,
-                                                      s=self.n_scales-1,
-                                                      custom_t=num_denoising_steps,
-                                                      scale_mul=(1,1))
-        final_img_renorm = (final_image + 1) * 0.5
-        final_results_folder = Path(str(self.ema_model.results_folder / f'final_samples'))
-        final_results_folder.mkdir(parents=True, exist_ok=True)
-        utils.save_image(final_img_renorm, str(final_results_folder / (desc + '.png')), nrow=4)
+    #     # insert patch into original image
+    #     image[:, :, clip_roi_bb[0]:clip_roi_bb[0] + clip_roi_bb[2],clip_roi_bb[1]:clip_roi_bb[1] + clip_roi_bb[3]] = image_roi
+    #     #
+    #     final_image = self.ema_model.sample_via_scale(sample_batch_size,
+    #                                                   image,
+    #                                                   s=self.n_scales-1,
+    #                                                   custom_t=num_denoising_steps,
+    #                                                   scale_mul=(1,1))
+    #     final_img_renorm = (final_image + 1) * 0.5
+    #     final_results_folder = Path(str(self.ema_model.results_folder / f'final_samples'))
+    #     final_results_folder.mkdir(parents=True, exist_ok=True)
+    #     utils.save_image(final_img_renorm, str(final_results_folder / (desc + '.png')), nrow=4)
 
-        if save_unbatched:
-            final_results_folder = Path(str(self.results_folder / f'final_samples_unbatched_{desc}'))
-            final_results_folder.mkdir(parents=True, exist_ok=True)
-            for b in range(sample_batch_size):
-                utils.save_image(final_img_renorm[b], os.path.join(final_results_folder, f'{desc}_out_b{b}.png'))
+    #     if save_unbatched:
+    #         final_results_folder = Path(str(self.results_folder / f'final_samples_unbatched_{desc}'))
+    #         final_results_folder.mkdir(parents=True, exist_ok=True)
+    #         for b in range(sample_batch_size):
+    #             utils.save_image(final_img_renorm[b], os.path.join(final_results_folder, f'{desc}_out_b{b}.png'))
 
-    def roi_guided_sampling(self, custom_t_list=None, target_roi=None, roi_bb_list=None, save_unbatched=False, batch_size=4 ,scale_mul=(1, 1)):
-        self.ema_model.roi_guided_sampling = True
-        self.ema_model.roi_bbs = roi_bb_list
-        target_bb = target_roi
-        # create a corresponding downsampled patch for each scale
-        for scale in range(self.n_scales):
-            target_bb_rescaled = [int(bb_i / np.power(self.scale_factor, self.n_scales - scale - 1)) for bb_i in target_bb]
-            self.ema_model.roi_target_patch.append(extract_patch(self.data_list[scale][0][0][None, :,:,:], target_bb_rescaled))
+    # def roi_guided_sampling(self, custom_t_list=None, target_roi=None, roi_bb_list=None, save_unbatched=False, batch_size=4 ,scale_mul=(1, 1)):
+    #     self.ema_model.roi_guided_sampling = True
+    #     self.ema_model.roi_bbs = roi_bb_list
+    #     target_bb = target_roi
+    #     # create a corresponding downsampled patch for each scale
+    #     for scale in range(self.n_scales):
+    #         target_bb_rescaled = [int(bb_i / np.power(self.scale_factor, self.n_scales - scale - 1)) for bb_i in target_bb]
+    #         self.ema_model.roi_target_patch.append(extract_patch(self.data_list[scale][0][0][None, :,:,:], target_bb_rescaled))
 
-        self.sample_scales(scale_mul=scale_mul,  # H,W
-                           custom_sample=False,
-                           image_name='',
-                           batch_size=batch_size,
-                           custom_t_list=custom_t_list,
-                           desc=f'roi_{str(datetime.datetime.now()).replace(":", "_")}',
-                           save_unbatched=save_unbatched,
-                           start_noise=True,
-                           )
-        self.ema_model.roi_guided_sampling = False
+    #     self.sample_scales(scale_mul=scale_mul,  # H,W
+    #                        custom_sample=False,
+    #                        image_name='',
+    #                        batch_size=batch_size,
+    #                        custom_t_list=custom_t_list,
+    #                        desc=f'roi_{str(datetime.datetime.now()).replace(":", "_")}',
+    #                        save_unbatched=save_unbatched,
+    #                        start_noise=True,
+    #                        )
+    #     self.ema_model.roi_guided_sampling = False
