@@ -63,39 +63,41 @@ class Dataset(data.Dataset):
         return self.transform(img)
 
 
-class MultiscaleTrainer(object):
+class MultiexposureTrainer(object):
 
     def __init__(
             self,
-            ms_diffusion_model,
+            fpa_diffusion_model,
             folder,
+            dataloader_list,
             *,
             ema_decay=0.995,
-            n_scales=None,
-            scale_factor=1,
-            image_sizes=None,
+            n_exposures=None,
+            # scale_factor=1,
+            # image_sizes=None,
+            save_and_sample_every=5,
             train_batch_size=32,
             train_lr=2e-5,
-            train_num_steps=100000,
+            total_epoch=200,
             gradient_accumulate_every=2,
             fp16=False,
             step_start_ema=2000,
-            update_ema_every=10,
-            save_and_sample_every=25000,
+            update_ema_every=1,
+            start_save_epoch=50,
             avg_window=100,
-            sched_milestones=None,
+            sched_epochs=None,
             results_folder='./results',
             device=None
     ):
         super().__init__()
         self.device = device
-        if sched_milestones is None:
-            self.sched_milestones = [10000, 30000, 60000, 80000, 90000]
+        if sched_epochs is None:
+            self.sched_epochs = [20, 40, 70, 80, 90, 110]
         else:
-            self.sched_milestones = sched_milestones
-        if image_sizes is None:
-            image_sizes = []
-        self.model = ms_diffusion_model
+            self.sched_epochs = sched_epochs
+        # if image_sizes is None:
+        #     image_sizes = []
+        self.model = fpa_diffusion_model
         self.ema = EMA(ema_decay)
         self.ema_model = copy.deepcopy(self.model)
         self.update_ema_every = update_ema_every
@@ -105,10 +107,11 @@ class MultiscaleTrainer(object):
         self.avg_window = avg_window
 
         self.batch_size = train_batch_size
-        self.n_scales = n_scales
-        self.scale_factor = scale_factor
+        self.n_exposures = n_exposures
+        # self.scale_factor = scale_factor
         self.gradient_accumulate_every = gradient_accumulate_every
-        self.train_num_steps = train_num_steps
+        self.total_epoch = total_epoch
+        self.start_save_epoch = start_save_epoch
 
         self.input_paths = []
         self.ds_list = []
@@ -116,26 +119,27 @@ class MultiscaleTrainer(object):
         self.data_list = []
         self.results_folder = Path(results_folder)
         self.results_folder.mkdir(parents=True, exist_ok=True)
+        self.dataloader_list = dataloader_list
 
-        for i in range(n_scales):
-            self.input_paths.append(folder + 'scale_' + str(i))
-            blurry_img = True if i > 0 else False
-            self.ds_list.append(Dataset(self.input_paths[i], image_sizes[i], blurry_img))
-            self.dl_list.append(
-                cycle(data.DataLoader(self.ds_list[i], batch_size=train_batch_size, shuffle=True, pin_memory=True)))
+        # for i in range(n_scales):
+        #     self.input_paths.append(folder + 'scale_' + str(i))
+        #     blurry_img = True if i > 0 else False
+        #     self.ds_list.append(Dataset(self.input_paths[i], image_sizes[i], blurry_img))
+        #     self.dl_list.append(
+        #         cycle(data.DataLoader(self.ds_list[i], batch_size=train_batch_size, shuffle=True, pin_memory=True)))
 
-            if i > 0:
-                Data = next(self.dl_list[i])
-                self.data_list.append((Data[0].to(self.device), Data[1].to(self.device)))
-            else:
-                self.data_list.append(
-                    (next(self.dl_list[i]).to(self.device), next(self.dl_list[i]).to(self.device)))  # just duplicate orig over blurry_img for scale 0
+        #     if i > 0:
+        #         Data = next(self.dl_list[i])
+        #         self.data_list.append((Data[0].to(self.device), Data[1].to(self.device)))
+        #     else:
+        #         self.data_list.append(
+        #             (next(self.dl_list[i]).to(self.device), next(self.dl_list[i]).to(self.device)))  # just duplicate orig over blurry_img for scale 0
 
-        self.opt = Adam(ms_diffusion_model.parameters(), lr=train_lr)
+        self.opt = Adam(fpa_diffusion_model.parameters(), lr=train_lr)
 
-        self.scheduler = MultiStepLR(self.opt, milestones=self.sched_milestones, gamma=0.5)
+        self.scheduler = MultiStepLR(self.opt, milestones=self.sched_epochs, gamma=0.5)
 
-        self.step = 0
+        self.epoch = 0
         self.running_loss = []
         self.running_scale = []
         self.avg_t = []
@@ -153,14 +157,14 @@ class MultiscaleTrainer(object):
         self.ema_model.load_state_dict(self.model.state_dict())
 
     def step_ema(self):
-        if self.step < self.step_start_ema:
+        if self.epoch < self.step_start_ema:
             self.reset_parameters()
             return
         self.ema.update_model_average(self.ema_model, self.model)
 
     def save(self, milestone):
         data = {
-            'step': self.step,
+            'step': self.epoch,
             'model': self.model.state_dict(),
             'ema': self.ema_model.state_dict(),
             'sched': self.scheduler.state_dict(),
@@ -179,7 +183,7 @@ class MultiscaleTrainer(object):
     def load(self, milestone):
         data = torch.load(str(self.results_folder / f'model-{milestone}.pt'), map_location=self.device)
 
-        self.step = data['step']
+        self.epoch = data['step']
         self.model.load_state_dict(data['model'])
         self.ema_model.load_state_dict(data['ema'])
         self.scheduler.load_state_dict(data['sched'])
@@ -190,58 +194,64 @@ class MultiscaleTrainer(object):
 
         backwards = partial(loss_backwards, self.fp16)
         loss_avg = 0
-        s_weights = torch.tensor(self.model.num_timesteps_trained, device=self.device, dtype=torch.float)
-        while self.step < self.train_num_steps:
+        # s_weights = torch.tensor(self.model.num_timesteps_trained, device=self.device, dtype=torch.float)
+        while self.epoch < self.train_num_steps:
+            for loader in self.dataloader_list:
+                torch.set_grad_enabled(loader.training)
+                self.model.train(loader.training)
+                mode = "train" if loader.trainig else "val"
+                for data, _ in loader:
+                    ept = generate_random_even(self.model.timesteps)
+                    loss = self.model(data, ept)
+                    loss_avg += loss.item()
+                    backwards(loss / self.gradient_accumulate_every, self.opt)
 
-            # t weighted multinomial sampling
-            s = torch.multinomial(input=s_weights, num_samples=1)  # uniform when train_full_t = True
-            for i in range(self.gradient_accumulate_every):
-                data = self.data_list[s]
-                loss = self.model(data, s)
-                loss_avg += loss.item()
-                backwards(loss / self.gradient_accumulate_every, self.opt)
+                if self.epoch % self.avg_window == 0:
+                    print(f'[{mode}]epoch:{self.epoch} loss:{loss_avg/self.avg_window}')
+                    self.running_loss.append(loss_avg/self.avg_window)
+                    loss_avg = 0
+                
+                if loader.training:
+                    self.opt.step()
+                    self.opt.zero_grad()
 
-            if self.step % self.avg_window == 0:
-                print(f'step:{self.step} loss:{loss_avg/self.avg_window}')
-                self.running_loss.append(loss_avg/self.avg_window)
-                loss_avg = 0
-            self.opt.step()
-            self.opt.zero_grad()
-
-            if self.step % self.update_ema_every == 0:
-                self.step_ema()
-            self.scheduler.step()
-            self.step += 1
-            if self.step % self.save_and_sample_every == 0: # TODO: should not save too many results, because we use a complete dataset
-                milestone = self.step // self.save_and_sample_every
-                batches = num_to_groups(16, self.batch_size)
-                all_images_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
-                all_images = torch.cat(all_images_list, dim=0)
-                all_images = (all_images + 1) * 0.5
-                utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow=4)
-                self.save(milestone)
+                    if self.epoch % self.update_ema_every == 0:
+                        self.step_ema()
+                    self.scheduler.step()
+            self.epoch += 1
+            if not loader.training:
+                if self.epoch > self.start and self.epoch % self.save_and_sample_every == 0:
+                    milestone = self.epoch 
+                    self.save(milestone)
+                    # batches = num_to_groups(16, self.batch_size)
+                    # all_images_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
+                    # all_images = torch.cat(all_images_list, dim=0)
+                    # all_images = (all_images + 1) * 0.5
+                    # TODO: no need to stitch images
+                    utils.save_image(loader[0][1], str(self.results_folder / f'sample-{milestone}.png'))
+                    
 
         print('training completed')
 
     def sample_scales(self, scale_mul=None, batch_size=16, custom_sample=False, custom_image_size_idxs=None,
                       custom_scales=None, image_name='', start_noise= True, custom_t_list=None, desc=None, save_unbatched=True):
-        if desc is None:
-            desc = f'sample_{str(datetime.datetime.now()).replace(":", "_")}'
-        if self.ema_model.reblurring:
-            desc = desc + '_rblr'
-        if self.ema_model.sample_limited_t:
-            desc = desc + '_t_lmtd'
+        # if desc is None:
+            # desc = f'sample_{str(datetime.datetime.now()).replace(":", "_")}'
+        # if self.ema_model.reblurring:
+        #     desc = desc + '_rblr'
+        # if self.ema_model.sample_limited_t:
+            # desc = desc + '_t_lmtd'
         # sample with custom t list
-        if custom_t_list is None:
-            custom_t_list = self.ema_model.num_timesteps_ideal[1:]
+        # if custom_t_list is None:
+            # custom_t_list = self.ema_model.num_timesteps_ideal[1:]
         # sample with custom scale list
-        if custom_scales is None:
-            custom_scales = [*range(self.n_scales)]
-            n_scales = self.n_scales
-        else:
-            n_scales = len(custom_scales)
-        if custom_image_size_idxs is None:
-            custom_image_size_idxs = [*range(self.n_scales)]
+        # if custom_scales is None:
+            # custom_scales = [*range(self.n_scales)]
+            # n_scales = self.n_scales
+        # else:
+            # n_scales = len(custom_scales)
+        # if custom_image_size_idxs is None:
+            # custom_image_size_idxs = [*range(self.n_scales)]
 
         samples_from_scales = []
         final_results_folder = Path(str(self.results_folder / 'final_samples'))

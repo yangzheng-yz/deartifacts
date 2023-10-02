@@ -5,8 +5,8 @@ import os
 # os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 import torchvision
 from FPADDM.functions import create_img_masks
-from FPADDM.models import FPADDMNet, MultiScaleGaussianDiffusion
-from FPADDM.trainer import MultiscaleTrainer
+from FPADDM.models import FPADDMNet, MultiFPAGaussianDiffusion
+from FPADDM.trainer import MultiexposureTrainer
 from text2live_util.clip_extractor import ClipExtractor
 
 def main():
@@ -88,7 +88,7 @@ def main():
     model.to(device)
 
     n_exposures = args.timesteps
-    ms_diffusion = MultiScaleGaussianDiffusion(
+    fpa_diffusion = MultiFPAGaussianDiffusion(
         denoise_fn=model,
         save_interm=save_interm,
         results_folder=results_folder, # for debug
@@ -106,16 +106,17 @@ def main():
         device=device,
         # reblurring=True,
         # sample_limited_t=args.sample_limited_t,
-        omega=args.omega
+        omega=args.omega,
+        masks=masks
     ).to(device)
 
     if args.sample_t_list is None:
-        sample_t_list = ms_diffusion.num_timesteps_ideal[1:]
+        sample_t_list = fpa_diffusion.num_timesteps_ideal[1:]
     else:
         sample_t_list = args.sample_t_list
 
-    ScaleTrainer = MultiscaleTrainer(
-            ms_diffusion,
+    ExposureTrainer = MultiexposureTrainer(
+            fpa_diffusion,
             folder=args.dataset_folder,
             n_exposures=n_exposures,
             # scale_factor=scale_factor,
@@ -135,11 +136,11 @@ def main():
         )
 
     if args.load_milestone > 0:
-        ScaleTrainer.load(milestone=args.load_milestone)
+        ExposureTrainer.load(milestone=args.load_milestone)
     if args.mode == 'train':
-        ScaleTrainer.train()
+        ExposureTrainer.train()
         # Sample after training is complete
-        ScaleTrainer.sample_scales(scale_mul=(1, 1),    # H,W
+        ExposureTrainer.sample_scales(scale_mul=(1, 1),    # H,W
                                    custom_sample=True,
                                    image_name=args.image_name,
                                    batch_size=args.sample_batch_size,
@@ -148,7 +149,7 @@ def main():
     elif args.mode == 'sample':
 
         # # Sample
-        ScaleTrainer.sample_scales(scale_mul=scale_mul,    # H,W
+        ExposureTrainer.sample_scales(scale_mul=scale_mul,    # H,W
                                    custom_sample=True,
                                    image_name=args.image_name,
                                    batch_size=args.sample_batch_size,
@@ -178,8 +179,8 @@ def main():
 
         llambda = 0.2
         stop_guidance = 3  # at the last scale, disable the guidance in the last x steps in order to avoid artifacts from CLIP
-        ScaleTrainer.ema_model.reblurring = False
-        ScaleTrainer.clip_sampling(clip_model=t2l_clip_extractor,
+        ExposureTrainer.ema_model.reblurring = False
+        ExposureTrainer.clip_sampling(clip_model=t2l_clip_extractor,
                                    text_input=text_input,
                                    strength=strength,
                                    sample_batch_size=args.sample_batch_size,
@@ -215,8 +216,8 @@ def main():
         else:  # mode == 'clip_style_trans':
             start_noise = False  # set false to start from original image at last scale
         image_name = args.image_name.rsplit( ".", 1 )[ 0 ] + '.png'
-        ScaleTrainer.ema_model.reblurring = False
-        ScaleTrainer.clip_sampling(clip_model=t2l_clip_extractor,
+        ExposureTrainer.ema_model.reblurring = False
+        ExposureTrainer.clip_sampling(clip_model=t2l_clip_extractor,
                                    text_input=text_input,
                                    strength=strength,
                                    sample_batch_size=args.sample_batch_size,
@@ -254,8 +255,8 @@ def main():
         roi = (lefttop_x, lefttop_y, roi_width, roi_height)
         roi_perm = [1, 0, 3, 2]
         roi = [roi[i] for i in roi_perm]
-        ScaleTrainer.ema_model.reblurring = False
-        ScaleTrainer.clip_roi_sampling(clip_model=t2l_clip_extractor,
+        ExposureTrainer.ema_model.reblurring = False
+        ExposureTrainer.clip_roi_sampling(clip_model=t2l_clip_extractor,
                                        text_input=text_input,
                                        strength=strength,
                                        sample_batch_size=args.sample_batch_size,
@@ -300,7 +301,7 @@ def main():
         empty_image = torchvision.transforms.ToTensor()(empty_image)
         torchvision.utils.save_image(empty_image, os.path.join(args.results_folder, args.scope, f'roi_patches.png'))
 
-        ScaleTrainer.roi_guided_sampling(custom_t_list=sample_t_list,
+        ExposureTrainer.roi_guided_sampling(custom_t_list=sample_t_list,
                                          target_roi=target_roi,
                                          roi_bb_list=roi_bb_list,
                                          save_unbatched=True,
@@ -329,8 +330,8 @@ def main():
         # use the histogram of the original image for histogram matching
         hist_ref_path = f'{args.dataset_folder}scale_{start_s}/'
 
-        ScaleTrainer.ema_model.reblurring = True
-        ScaleTrainer.image2image(input_folder=i2i_folder, input_file=args.input_image, mask=args.harm_mask, hist_ref_path=hist_ref_path,
+        ExposureTrainer.ema_model.reblurring = True
+        ExposureTrainer.image2image(input_folder=i2i_folder, input_file=args.input_image, mask=args.harm_mask, hist_ref_path=hist_ref_path,
                                  batch_size=args.sample_batch_size,
                                  image_name=args.image_name, start_s=start_s, custom_t=custom_t, scale_mul=(1, 1),
                                  device=device, use_hist=use_hist, save_unbatched=True, auto_scale=50000, mode=args.mode)

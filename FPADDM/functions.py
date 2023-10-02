@@ -161,3 +161,11 @@ def create_img_masks(raw_path, timesteps, size=(512, 640), num_frames=268, creat
 
     return masks
 
+def generate_random_even(timesteps):
+    # 创建一个包含所有偶数的数组，范围是从2到2*timesteps
+    even_numbers = np.arange(2, 2*timesteps + 1, 2)
+    
+    # 使用 numpy.random.choice 从偶数数组中随机选择一个元素
+    random_even = np.random.choice(even_numbers)
+    
+    return random_even

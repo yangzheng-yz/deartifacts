@@ -152,7 +152,7 @@ class FPADDMNet(nn.Module):
 
 
 
-class MultiScaleGaussianDiffusion(nn.Module):
+class MultiFPAGaussianDiffusion(nn.Module):
     def __init__(
             self,
             denoise_fn,
@@ -174,6 +174,7 @@ class MultiScaleGaussianDiffusion(nn.Module):
             # reblurring=True,
             # sample_limited_t=False,
             omega=0,
+            masks=None
     ):
         super().__init__()
         self.device = device
@@ -181,6 +182,7 @@ class MultiScaleGaussianDiffusion(nn.Module):
         self.results_folder = Path(results_folder)
         self.channels = channels
         self.n_exposures = n_exposures
+        self.masks = masks
         # self.scale_factor = scale_factor
         # self.image_sizes = ()
         # self.scale_mul = scale_mul
@@ -567,66 +569,65 @@ class MultiScaleGaussianDiffusion(nn.Module):
         img = F.interpolate(img, size=image_size, mode='bilinear')
         return self.p_sample_via_scale_loop(batch_size, img, s, custom_t=custom_t)
 
-    def q_sample(self, x_start, t, noise=None):
+    def q_sample(self, x_start, t, noise=None, mask=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
-
+        const = torch.ones_like(x_start)
+        print("[Debug]x_start max: ", max(x_start))
         return (
                 extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
-                extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
+                extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * (noise + const) * mask 
         )
 
-    def p_losses(self, x_start, t, s, noise=None, x_orig=None):
+    def p_losses(self, x_start, t, ept, noise=None, x_orig=None):
         b, c, h, w = x_start.shape
         noise = default(noise, lambda: torch.randn_like(x_start))
 
-        if int(s) > 0:
-            cur_gammas = self.gammas[s - 1].reshape(-1)
-            x_mix = extract(cur_gammas, t, x_start.shape) * x_start + \
-                    (1 - extract(cur_gammas, t, x_start.shape)) * x_orig  # mix blurred and orig
-            x_noisy = self.q_sample(x_start=x_mix, t=t, noise=noise)  # add noise
-            x_recon = self.denoise_fn(x_noisy, t, s)
+        # if int(s) > 0:
+        #     cur_gammas = self.gammas[s - 1].reshape(-1)
+        #     x_mix = extract(cur_gammas, t, x_start.shape) * x_start + \
+        #             (1 - extract(cur_gammas, t, x_start.shape)) * x_orig  # mix blurred and orig
+        #     x_noisy = self.q_sample(x_start=x_mix, t=t, noise=noise)  # add noise
+        #     x_recon = self.denoise_fn(x_noisy, t, s)
 
-        else:
-            x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-            x_recon = self.denoise_fn(x_noisy, t, s)
+        # else:
+        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise, mask=self.masks[int(ept) / int(2) - 1])
+        x_recon = self.denoise_fn(x_noisy, t, ept)
 
         if self.loss_type == 'l1':
             loss = (noise - x_recon).abs().mean()
         elif self.loss_type == 'l2':
             loss = F.mse_loss(noise, x_recon)
         elif self.loss_type == 'l1_pred_img':
-            if int(s) > 0:
-                cur_gammas = self.gammas[s - 1].reshape(-1)
-                if t[0]>0:
-                    x_mix_prev = extract(cur_gammas, t-1, x_start.shape) * x_start + \
-                            (1 - extract(cur_gammas, t-1, x_start.shape)) * x_orig  # mix blurred and orig
-                else:
-                    x_mix_prev = x_orig
-            else:
-                x_mix_prev = x_start
+            # if int(s) > 0:
+            #     cur_gammas = self.gammas[s - 1].reshape(-1)
+            #     if t[0]>0:
+            #         x_mix_prev = extract(cur_gammas, t-1, x_start.shape) * x_start + \
+            #                 (1 - extract(cur_gammas, t-1, x_start.shape)) * x_orig  # mix blurred and orig
+            #     else:
+            #         x_mix_prev = x_orig
+            # else:
+            x_mix_prev = x_start
             loss = (x_mix_prev-x_recon).abs().mean()
         else:
             raise NotImplementedError()
 
         return loss
 
-    def forward(self, x, s, *args, **kwargs):
-        if int(s) > 0:  # no deblurring in scale=0
-            x_orig = x[0]
-            x_recon = x[1]
-            b, c, h, w = x_orig.shape
-            device = x_orig.device
-            img_size = self.image_sizes[s]
-            assert h == img_size[0] and w == img_size[1], f'height and width of image must be {img_size}'
-            t = torch.randint(0, self.num_timesteps_trained[s], (b,), device=device).long()
-            return self.p_losses(x_recon, t, s, x_orig=x_orig, *args, **kwargs)
+    def forward(self, x, ept, *args, **kwargs):
+        # if int(s) > 0:  # no deblurring in scale=0
+        #     x_orig = x[0]
+        #     x_recon = x[1]
+        #     b, c, h, w = x_orig.shape
+        #     device = x_orig.device
+        #     img_size = self.image_sizes[s]
+        #     assert h == img_size[0] and w == img_size[1], f'height and width of image must be {img_size}'
+        #     t = torch.randint(0, self.num_timesteps_trained[s], (b,), device=device).long()
+        #     return self.p_losses(x_recon, t, s, x_orig=x_orig, *args, **kwargs)
 
-        else:
+        # else:
 
-            b, c, h, w = x[0].shape
-            device = x[0].device
-            img_size = self.image_sizes[s]
-            assert h == img_size[0] and w == img_size[1], f'height and width of image must be {img_size}'
-            t = torch.randint(0, self.num_timesteps_trained[s], (b,), device=device).long()
-            return self.p_losses(x[0], t, s, *args, **kwargs)
+        b, c, h, w = x.shape
+        device = x.device
+        t = torch.randint(0, self.num_timesteps_trained[0], (b,), device=device).long()
+        return self.p_losses(x, t, ept, *args, **kwargs)
 
