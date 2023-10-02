@@ -86,6 +86,41 @@ class ArtifactRemovalDataset(Dataset):
         
         return with_art_tensor, without_art_tensor, img_name
 
+class FPADDMDataset(Dataset):
+    def __init__(self, root_dir, split='train', training=True):
+        self.root_dir = root_dir
+        self.split = split
+        self.training = training
+        
+        self.with_art_dir = os.path.join(root_dir, split, 'with_art')
+        self.without_art_dir = os.path.join(root_dir, split, 'without_art')
+        
+        # Assuming the images are named as 0000.png, 0001.png, and so on.
+        self.image_files = sorted(os.listdir(self.without_art_dir))
+    
+    def __len__(self):
+        return len(self.image_files)
+    
+    def __getitem__(self, idx):
+        # raw_data_path = "path_to_.raw"
+        # raw_data = read_raw_images(raw_data_path, shape = (512, 640), num_images=268, dtype=np.uint8)
+        img_name = self.image_files[idx]
+        # if 'test' in self.split:
+        #     ept = int(self.split.split('_')[:-2])
+        #     without_art_path = os.path.join(self.without_art_dir, img_name)
+            
+        # with_art_path = os.path.join(self.with_art_dir, img_name)
+        without_art_path = os.path.join(self.without_art_dir, img_name)
+        
+        # with_art_image = read_png_image(with_art_path)
+        without_art_image = read_png_image(without_art_path)
+        
+        # Convert to PyTorch tensors
+        # with_art_tensor = torch.tensor(with_art_image[np.newaxis, :, :], dtype=torch.float32) / 255.0
+        without_art_tensor = torch.tensor(without_art_image[np.newaxis, :, :], dtype=torch.float32) / 255.0
+        
+        return without_art_tensor, img_name
+
 # Function to generate the dataset with and without artifacts
 def generate_artifact_dataset(data_root, raw_images, shape, num_images, radius=2, threshold=50):
     for dataset_type in ['train', 'val']: # ['train', 'test', 'val']:

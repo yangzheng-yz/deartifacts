@@ -87,7 +87,8 @@ class MultiexposureTrainer(object):
             avg_window=100,
             sched_epochs=None,
             results_folder='./results',
-            device=None
+            device=None,
+            raw_path=None
     ):
         super().__init__()
         self.device = device
@@ -143,6 +144,7 @@ class MultiexposureTrainer(object):
         self.running_loss = []
         self.running_scale = []
         self.avg_t = []
+        self.raw_path = raw_path
 
         assert not fp16 or fp16 and APEX_AVAILABLE, 'Apex must be installed in order for mixed precision training to be turned on'
 
@@ -190,45 +192,69 @@ class MultiexposureTrainer(object):
         self.running_loss = data['running_loss']
     #    self.running_scale = data['running_scale']
 
-    def train(self):
-
+    def train(self, dataloader_list=None, total_epoch=None):
+        if dataloader_list is None:
+            dataloader_list = self.dataloader_list
+        if total_epoch is None:
+            total_epoch = self.total_epoch
         backwards = partial(loss_backwards, self.fp16)
         loss_avg = 0
         # s_weights = torch.tensor(self.model.num_timesteps_trained, device=self.device, dtype=torch.float)
-        while self.epoch < self.train_num_steps:
-            for loader in self.dataloader_list:
+        while self.epoch < total_epoch:
+            for loader in dataloader_list:
                 torch.set_grad_enabled(loader.training)
                 self.model.train(loader.training)
                 mode = "train" if loader.trainig else "val"
-                for data, _ in loader:
-                    ept = generate_random_even(self.model.timesteps)
-                    loss = self.model(data, ept)
-                    loss_avg += loss.item()
-                    backwards(loss / self.gradient_accumulate_every, self.opt)
-
-                if self.epoch % self.avg_window == 0:
-                    print(f'[{mode}]epoch:{self.epoch} loss:{loss_avg/self.avg_window}')
-                    self.running_loss.append(loss_avg/self.avg_window)
-                    loss_avg = 0
-                
                 if loader.training:
+                    for clean_data, image_name in loader:
+                        ept = generate_random_even(self.model.timesteps)
+                        loss = self.model(clean_data, ept)
+                        loss_avg += loss.item()
+                        backwards(loss / self.gradient_accumulate_every, self.opt)
+
+                    if self.epoch % self.avg_window == 0:
+                        print(f'[{mode}]epoch:{self.epoch} loss:{loss_avg/self.avg_window}')
+                        self.running_loss.append(loss_avg/self.avg_window)
+                        loss_avg = 0
+                    
+                    
                     self.opt.step()
                     self.opt.zero_grad()
 
                     if self.epoch % self.update_ema_every == 0:
                         self.step_ema()
                     self.scheduler.step()
+                else:
+                    for idx, (clean_data, image_name) in enumerate(loader):
+                        for ept in [20, 50, 100, 150, 200]:
+                            b, *_ = clean_data.shape
+                            noisy_data = add_noise(self.raw_path, clean_data.clone(), ept)
+                            clean_images = self.model.iterative_deartifacts(noisy_data, ept)
+                            metrics = 0
+                            for idx, _ in enumerate(clean_images):
+                                metrics += self.PSNR(clean_images[idx], clean_data[idx]).item()
+                            print(f'[{mode}]epoch:{self.epoch} psnr:{metrics / b}')
+                    if self.epoch > self.start and self.epoch % self.save_and_sample_every == 0:
+                        milestone = self.epoch 
+                        self.save(milestone)
+                        # batches = num_to_groups(16, self.batch_size)
+                        # all_images_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
+                        # all_images = torch.cat(all_images_list, dim=0)
+                        # all_images = (all_images + 1) * 0.5
+                        # TODO: no need to stitch images
+                        # utils.save_image(loader[0][1], str(self.results_folder / f'sample-{milestone}.png'))
+                        
             self.epoch += 1
-            if not loader.training:
-                if self.epoch > self.start and self.epoch % self.save_and_sample_every == 0:
-                    milestone = self.epoch 
-                    self.save(milestone)
-                    # batches = num_to_groups(16, self.batch_size)
-                    # all_images_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
-                    # all_images = torch.cat(all_images_list, dim=0)
-                    # all_images = (all_images + 1) * 0.5
-                    # TODO: no need to stitch images
-                    utils.save_image(loader[0][1], str(self.results_folder / f'sample-{milestone}.png'))
+            # if not loader.training:
+            #     if self.epoch > self.start and self.epoch % self.save_and_sample_every == 0:
+            #         milestone = self.epoch 
+            #         self.save(milestone)
+            #         # batches = num_to_groups(16, self.batch_size)
+            #         # all_images_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
+            #         # all_images = torch.cat(all_images_list, dim=0)
+            #         # all_images = (all_images + 1) * 0.5
+            #         # TODO: no need to stitch images
+            #         utils.save_image(loader[0][1], str(self.results_folder / f'sample-{milestone}.png'))
                     
 
         print('training completed')

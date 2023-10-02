@@ -169,3 +169,14 @@ def generate_random_even(timesteps):
     random_even = np.random.choice(even_numbers)
     
     return random_even
+# TODO: should check the value range
+def add_noise(raw_path, clean_data, ept, size=(512, 640), dtype=np.uint8, num_frames=268, alpha=0.5):
+    images = read_raw_images(raw_path, size, num_frames, dtype=dtype)
+    normal_values = torch.randn(clean_data.shape)
+    mask = torch.zeros_like(clean_data, dtype=torch.int)
+    const = torch.ones_like(clean_data, dtype=torch.int)
+    
+    overlay_image = alpha * clean_data + (1 - alpha) * mask * (normal_values + const)
+    overlay_image = torch.clamp(overlay_image, 0, 1)
+    
+    return overlay_image

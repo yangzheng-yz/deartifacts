@@ -355,7 +355,7 @@ class MultiFPAGaussianDiffusion(nn.Module):
 
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    @torch.enable_grad()
+    # @torch.enable_grad()
     def p_mean_variance(self, x, t, s, clip_denoised: bool):
         pred_noise = self.denoise_fn(x, t, scale=s)
         x_recon, x_t_mix = self.predict_start_from_noise(x, t=t, s=s, noise=pred_noise)
@@ -450,7 +450,7 @@ class MultiFPAGaussianDiffusion(nn.Module):
                                                                                   )
         return model_mean, posterior_variance, posterior_log_variance
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def p_sample(self, x, t, s, clip_denoised=True, repeat_noise=False):
         b, *_, device = *x.shape, x.device
 
@@ -463,7 +463,7 @@ class MultiFPAGaussianDiffusion(nn.Module):
         return model_mean + nonzero_mask_s * nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def p_sample_loop(self, shape, s):
         device = self.betas.device
 
@@ -490,7 +490,7 @@ class MultiFPAGaussianDiffusion(nn.Module):
                                  nrow=4)
         return img
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def sample(self, batch_size=16, scale_0_size=None, s=0):
         """
         Sample from the first scale (without conditioning on a previous scale's output).
@@ -502,7 +502,7 @@ class MultiFPAGaussianDiffusion(nn.Module):
         channels = self.channels
         return self.p_sample_loop((batch_size, channels, image_size[0], image_size[1]), s=s)
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def p_sample_via_scale_loop(self, batch_size, img, s, custom_t=None):
         device = self.betas.device
         if custom_t is None:
@@ -550,7 +550,7 @@ class MultiFPAGaussianDiffusion(nn.Module):
                                  nrow=4)
         return img
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def sample_via_scale(self, batch_size, img, s, scale_mul=(1, 1), custom_sample=False, custom_img_size_idx=0, custom_t=None, custom_image_size=None):
         """
         Sampling at a given scale s conditioned on the output of a previous scale.
@@ -572,11 +572,12 @@ class MultiFPAGaussianDiffusion(nn.Module):
         return self.p_sample_via_scale_loop(batch_size, img, s, custom_t=custom_t)
     
     # TODO: mask 's batch size?
-    @torch.no_grad()
-    def inverse_q_sample(self, x_t, t, noise=None, mask=None):
+    # @torch.no_grad()
+    def inverse_q_sample(self, x_t, t, ept, noise=None):
+        noise = self.denoise_fn(x_t, t, ept)
         const = torch.ones_like(x_t)
         x_t_prev = extract(self.sqrt_recip_alphas, t, x_t.shape) * (x_t - 
-            extract(self.sqrt_betas, t, x_t.shape) * mask * (noise + const))        
+            extract(self.sqrt_betas, t, x_t.shape) * self.masks[int(ept) / int(2) - 1] * (noise + const))        
         return x_t_prev
 
     def q_sample(self, x_start, t, noise=None, mask=None):
@@ -622,6 +623,14 @@ class MultiFPAGaussianDiffusion(nn.Module):
             raise NotImplementedError()
 
         return loss
+
+    def iterative_deartifacts(self, x_T, ept, T=50):
+        clean_images = x_T.clone()
+        
+        for t in reversed(range(0, T)):
+            clean_images = self.inverse_q_sample(clean_images, t, ept)
+            
+        return clean_images
 
     def forward(self, x, ept, *args, **kwargs):
         # if int(s) > 0:  # no deblurring in scale=0
